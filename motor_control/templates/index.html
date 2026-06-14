@@ -219,6 +219,43 @@
     font-size: 1.1rem; background: none; border: none; color: #888;
     cursor: pointer; touch-action: manipulation;
   }
+
+  /* Landscape: video fills left, right column has joystick + controls below */
+  @media (orientation: landscape) and (max-height: 500px) {
+    body {
+      padding: 4px; flex-direction: row; align-items: center;
+      justify-content: center; gap: 6px; overflow: hidden;
+    }
+    body h1, body .subtitle, body .motor-display, body .status-bar,
+    body > .speed-row { display: none; }
+    body .cam-wrap {
+      flex: 1; max-width: none; height: 100%; margin: 0;
+      border-radius: 4px; aspect-ratio: auto;
+    }
+    body .cam-wrap img { object-fit: contain; }
+    body .right-col {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 10px; flex-shrink: 0;
+    }
+    body .joystick-area {
+      width: 160px; height: 160px; margin: 0; flex-shrink: 0;
+      opacity: 0.5; transition: opacity 0.2s;
+    }
+    body .joystick-area:active { opacity: 0.9; }
+    body .left-controls {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 6px;
+    }
+    body .left-controls .controls-row { display: flex; margin: 0; }
+    body .left-controls .toggle-label { font-size: 0.65rem; gap: 4px; }
+    body .left-controls .toggle-switch { width: 32px; height: 18px; }
+    body .left-controls .toggle-switch::after { width: 14px; height: 14px; }
+    body .left-controls .toggle-switch.active::after { left: 16px; }
+    body .left-controls .stop-btn {
+      width: 64px; padding: 10px; font-size: 0.75rem; border-radius: 8px; margin: 0;
+    }
+    body .gear-btn { z-index: 20; }
+  }
 </style>
 </head>
 <body>
@@ -233,27 +270,31 @@
     <div class="cam-fps" id="cam-fps">-- fps</div>
   </div>
 
-  <div class="joystick-area control">
-    <div class="joystick-base" id="joy-base">
-      <div class="center-dot"></div>
-      <div class="direction-label dir-fwd">▲ FWD</div>
-      <div class="direction-label dir-rev">REV ▼</div>
-      <div class="direction-label dir-left">◀ L</div>
-      <div class="direction-label dir-right">R ▶</div>
-      <div class="joystick-knob" id="joy-knob"></div>
+  <div class="right-col">
+    <div class="joystick-area control">
+      <div class="joystick-base" id="joy-base">
+        <div class="center-dot"></div>
+        <div class="direction-label dir-fwd">▲ FWD</div>
+        <div class="direction-label dir-rev">REV ▼</div>
+        <div class="direction-label dir-left">◀ L</div>
+        <div class="direction-label dir-right">R ▶</div>
+        <div class="joystick-knob" id="joy-knob"></div>
+      </div>
     </div>
-  </div>
 
-  <div class="controls-row control">
-    <label class="toggle-label active" id="toggle-label">
-      <span class="toggle-switch active" id="toggle-switch"></span>
-      Auto-Center
-    </label>
+    <div class="left-controls">
+      <div class="controls-row control">
+        <label class="toggle-label active" id="toggle-label">
+          <span class="toggle-switch active" id="toggle-switch"></span>
+          Auto-Center
+        </label>
+      </div>
+      <button class="stop-btn control" id="stop-btn">STOP</button>
+    </div>
   </div>
 
   <div class="motor-display control" id="motor-display"></div>
 
-  <button class="stop-btn control" id="stop-btn">STOP</button>
   <div class="status-bar" id="status-bar"></div>
 
   <div class="overlay" id="reconnect-overlay">
