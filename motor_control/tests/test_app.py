@@ -56,17 +56,20 @@ class TestSetSpeed:
         client = self._make_client()
         client.emit('set_speed', {'motor': 'XX', 'speed': 50})
         received = client.get_received()
-        status = received[-1]['args'][0]
-        for m in MOTOR_NAMES:
-            assert status['speeds'][m] == 0
+        statuses = [m['args'][0] for m in received if m['name'] == 'status']
+        if statuses:
+            status = statuses[-1]
+            for m in MOTOR_NAMES:
+                assert status['speeds'][m] == 0
         client.disconnect()
 
     def test_connect_sends_current_state(self):
         app_module.controller.set_speed('FL', 40)
         client = self._make_client()
         received = client.get_received()
-        status = received[-1]['args'][0]
-        assert status['speeds']['FL'] == 40
+        statuses = [m['args'][0] for m in received if m['name'] == 'status']
+        assert len(statuses) > 0
+        assert statuses[-1]['speeds']['FL'] == 40
         client.disconnect()
 
     def test_set_speeds_multiple(self):
@@ -75,12 +78,14 @@ class TestSetSpeed:
         client.emit('set_speeds', {
             'speeds': {'FL': 50, 'FR': -50, 'RL': 25, 'RR': -25}
         })
-        received = client.get_received()
-        status = received[-1]['args'][0]
-        assert status['speeds']['FL'] == 50
-        assert status['speeds']['FR'] == -50
-        assert status['speeds']['RL'] == 25
-        assert status['speeds']['RR'] == -25
+        # set_speeds intentionally omits status echo (it creates a thread
+        # per call, killing performance). Check controller directly.
+        import time; time.sleep(0.05)
+        speeds = app_module.controller.get_all_speeds()
+        assert speeds['FL'] == 50
+        assert speeds['FR'] == -50
+        assert speeds['RL'] == 25
+        assert speeds['RR'] == -25
         client.disconnect()
 
 

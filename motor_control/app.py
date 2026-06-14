@@ -5,14 +5,14 @@ import sys
 import threading
 import time
 
-from flask import Flask, render_template, Response
+from flask import Flask, jsonify, render_template, Response, stream_with_context
 from flask_socketio import SocketIO
 
 from motor_control import MotorController, MOTOR_NAMES
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(24).hex()
-sio = SocketIO(app, cors_allowed_origins='*')
+sio = SocketIO(app, cors_allowed_origins='*', async_mode='threading')
 
 controller = None
 _update_lock = threading.Lock()
@@ -21,7 +21,6 @@ camera = None
 camera_lock = threading.Lock()
 camera_available = False
 latest_frame = None
-_camera_thread = None
 
 
 def get_ip():
@@ -65,32 +64,37 @@ def camera_capture_loop():
             latest_frame = buf.getvalue()
         except Exception:
             time.sleep(0.1)
-        time.sleep(0.05)
+        time.sleep(0.1)
 
+
+@app.route('/api/camera_status')
+def api_camera_status():
+    return jsonify({'available': camera_available})
 
 @app.route('/')
 def index():
-    cam_status = '1' if camera_available else '0'
-    return render_template('index.html', camera=cam_status)
+    return render_template('index.html')
 
 
 @app.route('/video_feed')
 def video_feed():
     def generate():
-        sent = None
-        while True:
-            global latest_frame
-            frame = latest_frame
-            if frame is not None and frame is not sent:
-                sent = frame
-                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-            time.sleep(0.03)
-    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+        try:
+            while True:
+                frame = latest_frame
+                if frame is not None:
+                    yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                time.sleep(0.03)
+        except GeneratorExit:
+            pass
+    return Response(stream_with_context(generate()),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
 @sio.on('connect')
 def on_connect():
     sio.emit('status', {'speeds': controller.get_all_speeds()})
+    sio.emit('camera_status', {'available': camera_available})
 
 
 @sio.on('set_speed')
@@ -109,7 +113,8 @@ def on_set_speeds(data):
     speeds = data.get('speeds', {})
     with _update_lock:
         controller.set_speeds(speeds)
-    sio.emit('status', {'speeds': controller.get_all_speeds()})
+    # No status echo — client is authoritative and ignores it.
+    # Broadcasting here creates a thread per frame (up to 60/s).
 
 
 @sio.on('stop')
@@ -119,24 +124,35 @@ def on_stop(_data=None):
     sio.emit('status', {'speeds': controller.get_all_speeds()})
 
 
+def init_camera_async():
+    global camera_available
+    try:
+        init_camera()
+        if camera_available:
+            th = threading.Thread(target=camera_capture_loop, daemon=True)
+            th.start()
+            print('Camera capture loop started')
+    except Exception as e:
+        print(f'Camera init thread error: {e}')
+
+
 def main():
-    global controller, _camera_thread
+    global controller
     try:
         controller = MotorController()
     except ConnectionError as e:
         print(f'FATAL: {e}', file=sys.stderr)
         sys.exit(1)
 
-    init_camera()
-    if camera_available:
-        _camera_thread = threading.Thread(target=camera_capture_loop, daemon=True)
-        _camera_thread.start()
+    cam_thread = threading.Thread(target=init_camera_async, daemon=True)
+    cam_thread.start()
 
     ip = get_ip()
     port = 5000
     print(f'Motor controller ready at http://{ip}:{port}')
     print(f'Hostname: {socket.gethostname()}.local:{port}')
     print(f'Motors: {", ".join(MOTOR_NAMES)}')
+    print('Camera initializing in background...')
     sio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
 
 

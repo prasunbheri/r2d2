@@ -7,11 +7,13 @@
 <script src="/static/socket.io.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #1a1a2e; color: #eee; min-height: 100vh; display: flex;
+    background: #1a1a2e; color: #eee; display: flex;
     flex-direction: column; align-items: center; padding: 16px; touch-action: none;
     user-select: none; -webkit-user-select: none;
+    overflow-y: auto; -webkit-overflow-scrolling: touch;
   }
   h1 { font-size: 1.5rem; margin: 8px 0 4px; color: #e94560; letter-spacing: 1px; }
   .subtitle { font-size: 0.8rem; color: #888; margin-bottom: 8px; }
@@ -19,7 +21,8 @@
   .disconnected { color: #e94560; }
 
   .joystick-area {
-    position: relative; width: 240px; height: 240px; margin: 12px auto;
+    position: relative; width: 200px; height: 200px; margin: 8px auto;
+    flex-shrink: 0;
   }
   .joystick-base {
     width: 100%; height: 100%; border-radius: 50%;
@@ -115,9 +118,10 @@
   }
 
   .cam-wrap {
-    width: 100%; max-width: 320px; margin: 10px 0; border-radius: 10px;
+    width: 100%; max-width: 240px; margin: 6px 0; border-radius: 8px;
     overflow: hidden; background: #000; aspect-ratio: 4/3;
-    box-shadow: 0 0 16px rgba(0,0,0,0.4);
+    box-shadow: 0 0 12px rgba(0,0,0,0.4);
+    flex-shrink: 0;
   }
   .cam-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .cam-wrap.hidden { display: none; }
@@ -126,23 +130,59 @@
     font-size: 0.7rem; color: #555; text-align: center;
     margin-top: 4px;
   }
+
+  .overlay {
+    position: fixed; inset: 0; z-index: 999;
+    background: rgba(10, 10, 30, 0.75);
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 12px;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.5s ease;
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+  }
+  .overlay.visible {
+    opacity: 1; pointer-events: auto;
+  }
+  .overlay .msg {
+    font-size: 2rem; font-weight: 700; color: #e94560;
+    letter-spacing: 2px;
+    animation: glow 1.5s ease-in-out infinite;
+  }
+  .overlay .sub {
+    font-size: 1.2rem; font-weight: 600; color: #e94560;
+  }
+  @keyframes glow {
+    0%, 100% { opacity: 0.3; text-shadow: 0 0 8px rgba(233,69,96,0.3); }
+    50% { opacity: 1; text-shadow: 0 0 24px rgba(233,69,96,0.7); }
+  }
+
+  body.disconnected .control {
+    opacity: 0.4; transition: opacity 0.5s ease;
+  }
+  body:not(.disconnected) .control {
+    opacity: 1; transition: opacity 0.5s ease;
+  }
 </style>
 </head>
 <body>
   <h1>R2 Control Bridge</h1>
   <div class="subtitle" id="conn-status">disconnected</div>
+  <div class="cam-wrap control hidden" id="cam-wrap">
+    <img src="/video_feed" id="cam-feed" alt="camera">
+  </div>
 
-  <div class="speed-row">
+  <div class="speed-row control">
     <div class="slider-label"><span>Joystick Speed</span><span id="speed-val">70%</span></div>
     <input type="range" id="speed-slider" min="0" max="100" value="70">
   </div>
 
-  <div class="speed-row">
+  <div class="speed-row control">
     <div class="slider-label"><span>Max Speed Limiter</span><span id="limiter-val">50%</span></div>
     <input type="range" id="limiter-slider" min="0" max="100" value="50">
   </div>
 
-  <div class="joystick-area">
+  <div class="joystick-area control">
     <div class="joystick-base" id="joy-base">
       <div class="center-dot"></div>
       <div class="direction-label dir-fwd">▲ FWD</div>
@@ -153,20 +193,22 @@
     </div>
   </div>
 
-  <div class="controls-row">
+  <div class="controls-row control">
     <label class="toggle-label active" id="toggle-label">
       <span class="toggle-switch active" id="toggle-switch"></span>
       Auto-Center
     </label>
   </div>
 
-  <div class="motor-display" id="motor-display"></div>
+  <div class="motor-display control" id="motor-display"></div>
 
-  <button class="stop-btn" id="stop-btn">STOP</button>
-  <div class="cam-wrap {{ 'hidden' if camera == '0' }}" id="cam-wrap">
-    <img src="/video_feed" id="cam-feed" alt="camera">
-  </div>
+  <button class="stop-btn control" id="stop-btn">STOP</button>
   <div class="status-bar" id="status-bar"></div>
+
+  <div class="overlay" id="reconnect-overlay">
+    <div class="msg">Reconnecting</div>
+    <div class="sub"><span style="color:#888">in </span><span id="reconnect-sub">5</span><span style="color:#888"> seconds</span></div>
+  </div>
 
 <script>
 const MOTORS = ['FL', 'FR', 'RL', 'RR'];
@@ -185,11 +227,14 @@ const speedVal = document.getElementById('speed-val');
 const limiterSlider = document.getElementById('limiter-slider');
 const limiterVal = document.getElementById('limiter-val');
 
-const RADIUS = 88;
+const RADIUS = 68;
+const GRAB_THRESHOLD = 6;
 let autoCenter = true;
 let active = false;
 let joyX = 0;
 let joyY = 0;
+let grabX = 0;
+let grabY = 0;
 let currentSpeeds = { FL: 0, FR: 0, RL: 0, RR: 0 };
 
 // Build motor display
@@ -229,7 +274,7 @@ function sendSpeeds(speeds) {
   updateDisplay();
 }
 
-function updateJoystick(clientX, clientY) {
+function clientToJoy(clientX, clientY) {
   const rect = base.getBoundingClientRect();
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
@@ -237,95 +282,135 @@ function updateJoystick(clientX, clientY) {
   const dy = clientY - cy;
   const dist = Math.sqrt(dx * dx + dy * dy);
   const maxDist = RADIUS;
-  let clampedX = dx;
-  let clampedY = dy;
+  let clampedX = dx, clampedY = dy;
   if (dist > maxDist) {
     clampedX = (dx / dist) * maxDist;
     clampedY = (dy / dist) * maxDist;
   }
-  joyX = (clampedX / maxDist) * 100;
-  joyY = -(clampedY / maxDist) * 100; // flip: up = positive
-  knob.style.transform = `translate(calc(-50% + ${clampedX}px), calc(-50% + ${clampedY}px))`;
-  const speeds = computeMotorSpeeds(joyX, joyY);
+  return {
+    joyX: (clampedX / maxDist) * 100,
+    joyY: -(clampedY / maxDist) * 100,
+    pxX: clampedX,
+    pxY: clampedY,
+  };
+}
+
+function applyJoy(x, y) {
+  joyX = x; joyY = y;
+  const maxDist = RADIUS;
+  knob.style.transform = `translate(calc(-50% + ${(x / 100) * maxDist}px), calc(-50% + ${-(y / 100) * maxDist}px))`;
+  const speeds = computeMotorSpeeds(x, y);
   sendSpeeds(speeds);
 }
 
-let returnAnimId = null;
+let animId = null;
 
-function resetJoystick(animate) {
-  if (returnAnimId) { cancelAnimationFrame(returnAnimId); returnAnimId = null; }
-  if (animate && (joyX !== 0 || joyY !== 0)) {
-    const startX = joyX;
-    const startY = joyY;
-    const s = parseInt(speedSlider.value);
-    const duration = (100 - s) * 30 + 50;
-    const startTime = performance.now();
+function cancelAnim() {
+  if (animId) { cancelAnimationFrame(animId); animId = null; }
+}
 
-    function tick(time) {
-      const t = Math.min((time - startTime) / duration, 1);
-      const ease = 1 - (1 - t) * (1 - t);
-      const curX = startX * (1 - ease);
-      const curY = startY * (1 - ease);
-      joyX = curX;
-      joyY = curY;
-      const maxDist = RADIUS;
-      knob.style.transform = `translate(calc(-50% + ${(curX / 100) * maxDist}px), calc(-50% + ${-(curY / 100) * maxDist}px))`;
-      const speeds = computeMotorSpeeds(curX, curY);
-      sendSpeeds(speeds);
-      if (t < 1 && !active) {
-        returnAnimId = requestAnimationFrame(tick);
-      } else {
-        returnAnimId = null;
-      }
+function animateJoy(startX, startY, endX, endY) {
+  cancelAnim();
+  const s = parseInt(speedSlider.value);
+  const duration = (100 - s) * 30 + 50;
+  const startTime = performance.now();
+
+  function tick(time) {
+    if (!active) { animId = null; return; }
+    const t = Math.min((time - startTime) / duration, 1);
+    const ease = 1 - (1 - t) * (1 - t);
+    const curX = startX + (endX - startX) * ease;
+    const curY = startY + (endY - startY) * ease;
+    applyJoy(curX, curY);
+    if (t < 1) {
+      animId = requestAnimationFrame(tick);
+    } else {
+      animId = null;
+      applyJoy(endX, endY);
     }
-    returnAnimId = requestAnimationFrame(tick);
-  } else {
-    joyX = 0; joyY = 0;
-    knob.style.transform = 'translate(-50%, -50%)';
-    const speeds = { FL: 0, FR: 0, RL: 0, RR: 0 };
-    sendSpeeds(speeds);
   }
+  animId = requestAnimationFrame(tick);
+}
+
+function animateReturn(startX, startY) {
+  cancelAnim();
+  const s = parseInt(speedSlider.value);
+  const duration = (100 - s) * 30 + 50;
+  const startTime = performance.now();
+
+  function tick(time) {
+    const t = Math.min((time - startTime) / duration, 1);
+    const ease = 1 - (1 - t) * (1 - t);
+    const curX = startX * (1 - ease);
+    const curY = startY * (1 - ease);
+    applyJoy(curX, curY);
+    if (t < 1) {
+      animId = requestAnimationFrame(tick);
+    } else {
+      animId = null;
+      applyJoy(0, 0);
+    }
+  }
+  animId = requestAnimationFrame(tick);
 }
 
 // Mouse events
 base.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
-  if (returnAnimId) { cancelAnimationFrame(returnAnimId); returnAnimId = null; }
+  if (active) return;
+  cancelAnim();
   active = true;
-  updateJoystick(e.clientX, e.clientY);
+  grabX = e.clientX; grabY = e.clientY;
+  const target = clientToJoy(e.clientX, e.clientY);
+  animateJoy(joyX, joyY, target.joyX, target.joyY);
 });
 
 document.addEventListener('mousemove', (e) => {
   if (!active) return;
-  updateJoystick(e.clientX, e.clientY);
+  const dx = e.clientX - grabX, dy = e.clientY - grabY;
+  if (animId && Math.sqrt(dx * dx + dy * dy) < GRAB_THRESHOLD) return;
+  cancelAnim();
+  const target = clientToJoy(e.clientX, e.clientY);
+  applyJoy(target.joyX, target.joyY);
 });
 
 document.addEventListener('mouseup', () => {
   if (!active) return;
   active = false;
-  if (autoCenter) resetJoystick(true);
+  if (autoCenter) {
+    animateReturn(joyX, joyY);
+  }
 });
 
 // Touch events
 base.addEventListener('touchstart', (e) => {
   e.preventDefault();
-  if (returnAnimId) { cancelAnimationFrame(returnAnimId); returnAnimId = null; }
+  if (active) return;
+  cancelAnim();
   active = true;
   const t = e.touches[0];
-  updateJoystick(t.clientX, t.clientY);
+  grabX = t.clientX; grabY = t.clientY;
+  const target = clientToJoy(t.clientX, t.clientY);
+  animateJoy(joyX, joyY, target.joyX, target.joyY);
 }, { passive: false });
 
 document.addEventListener('touchmove', (e) => {
   if (!active) return;
   e.preventDefault();
   const t = e.touches[0];
-  updateJoystick(t.clientX, t.clientY);
+  const dx = t.clientX - grabX, dy = t.clientY - grabY;
+  if (animId && Math.sqrt(dx * dx + dy * dy) < GRAB_THRESHOLD) return;
+  cancelAnim();
+  const target = clientToJoy(t.clientX, t.clientY);
+  applyJoy(target.joyX, target.joyY);
 }, { passive: false });
 
 document.addEventListener('touchend', (e) => {
   if (!active) return;
   active = false;
-  if (autoCenter) resetJoystick(true);
+  if (autoCenter) {
+    animateReturn(joyX, joyY);
+  }
 });
 
 // Speed slider (controls return-to-center damping)
@@ -347,28 +432,90 @@ toggleSwitch.addEventListener('click', () => {
   autoCenter = !autoCenter;
   toggleSwitch.classList.toggle('active', autoCenter);
   toggleLabel.classList.toggle('active', autoCenter);
-  if (autoCenter && (joyX !== 0 || joyY !== 0)) resetJoystick(true);
+  if (autoCenter && (joyX !== 0 || joyY !== 0)) {
+    cancelAnim();
+    active = false;
+    animateReturn(joyX, joyY);
+  }
 });
 
 // Stop button
 stopBtn.addEventListener('click', () => {
   active = false;
-  resetJoystick(false);
+  cancelAnim();
+  applyJoy(0, 0);
 });
 
-const socket = io();
+const overlay = document.getElementById('reconnect-overlay');
+const reconnectSub = document.getElementById('reconnect-sub');
+
+let countdownTimer = null;
+let countdown = 5;
+
+const socket = io({
+  reconnectionDelay: 5000,
+  reconnectionDelayMax: 5000,
+  randomizationFactor: 0,
+});
 
 socket.on('connect', () => {
+  if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+  document.body.classList.remove('disconnected');
+  overlay.classList.remove('visible');
   connStatus.textContent = 'connected';
   connStatus.className = 'subtitle connected';
   statusBar.textContent = '';
+  const cam = document.getElementById('cam-feed');
+  if (cam) cam.src = '/video_feed?' + Date.now();
 });
 
 socket.on('disconnect', () => {
+  countdown = 5;
+  reconnectSub.textContent = '5';
+  document.body.classList.add('disconnected');
+  overlay.classList.add('visible');
   connStatus.textContent = 'disconnected';
   connStatus.className = 'subtitle disconnected';
   statusBar.textContent = 'Connection lost.';
+  if (countdownTimer) clearInterval(countdownTimer);
+  countdownTimer = setInterval(() => {
+    countdown--;
+    if (countdown < 0) countdown = 5;
+    reconnectSub.textContent = countdown;
+  }, 1000);
 });
+
+socket.io.on('reconnect_attempt', () => {
+  countdown = 5;
+  reconnectSub.textContent = '5';
+});
+
+socket.on('camera_status', (data) => {
+  const camWrap = document.getElementById('cam-wrap');
+  const cam = document.getElementById('cam-feed');
+  if (data.available) {
+    camWrap.classList.remove('hidden');
+    cam.src = '/video_feed?' + Date.now();
+  } else {
+    camWrap.classList.add('hidden');
+  }
+});
+
+// Poll HTTP endpoint for camera status (covers clients already
+// connected when camera finishes initializing in the background).
+let camPoll = setInterval(async () => {
+  try {
+    const r = await fetch('/api/camera_status');
+    const d = await r.json();
+    if (d.available) {
+      clearInterval(camPoll); camPoll = null;
+      const camWrap = document.getElementById('cam-wrap');
+      const cam = document.getElementById('cam-feed');
+      camWrap.classList.remove('hidden');
+      cam.src = '/video_feed?' + Date.now();
+    }
+  } catch (_) {}
+}, 3000);
 
 socket.on('status', () => {
   // server echoes not used — client is the authoritative speed source
