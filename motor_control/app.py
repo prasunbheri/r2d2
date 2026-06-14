@@ -1,10 +1,11 @@
+import io
 import os
 import socket
 import sys
 import threading
 import time
 
-from flask import Flask, render_template
+from flask import Flask, render_template, Response
 from flask_socketio import SocketIO
 
 from motor_control import MotorController, MOTOR_NAMES
@@ -15,6 +16,12 @@ sio = SocketIO(app, cors_allowed_origins='*')
 
 controller = None
 _update_lock = threading.Lock()
+
+camera = None
+camera_lock = threading.Lock()
+camera_available = False
+latest_frame = None
+_camera_thread = None
 
 
 def get_ip():
@@ -28,9 +35,57 @@ def get_ip():
         return '127.0.0.1'
 
 
+def init_camera():
+    global camera, camera_available
+    try:
+        from picamera2 import Picamera2
+        camera = Picamera2()
+        config = camera.create_video_configuration(
+            main={"size": (640, 480)},
+            controls={"FrameDurationLimits": (33333, 33333)},
+        )
+        camera.configure(config)
+        camera.start()
+        camera_available = True
+        print('Camera: online (640x480 MJPEG)')
+    except Exception as e:
+        camera_available = False
+        print(f'Camera: unavailable ({e})')
+
+
+def camera_capture_loop():
+    global latest_frame
+    while camera_available:
+        try:
+            buf = io.BytesIO()
+            with camera_lock:
+                if camera_available:
+                    camera.capture_file(buf, format='jpeg')
+            buf.seek(0)
+            latest_frame = buf.getvalue()
+        except Exception:
+            time.sleep(0.1)
+        time.sleep(0.05)
+
+
 @app.route('/')
 def index():
-    return render_template('index.html')
+    cam_status = '1' if camera_available else '0'
+    return render_template('index.html', camera=cam_status)
+
+
+@app.route('/video_feed')
+def video_feed():
+    def generate():
+        sent = None
+        while True:
+            global latest_frame
+            frame = latest_frame
+            if frame is not None and frame is not sent:
+                sent = frame
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            time.sleep(0.03)
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
 @sio.on('connect')
@@ -65,12 +120,17 @@ def on_stop(_data=None):
 
 
 def main():
-    global controller
+    global controller, _camera_thread
     try:
         controller = MotorController()
     except ConnectionError as e:
         print(f'FATAL: {e}', file=sys.stderr)
         sys.exit(1)
+
+    init_camera()
+    if camera_available:
+        _camera_thread = threading.Thread(target=camera_capture_loop, daemon=True)
+        _camera_thread.start()
 
     ip = get_ip()
     port = 5000
