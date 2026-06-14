@@ -268,8 +268,22 @@ function computeMotorSpeeds(x, y) {
   };
 }
 
+let lastSpeedSend = 0;
+const SPEED_THROTTLE = 50; // ms — limits server thread creation
+
 function sendSpeeds(speeds) {
+  const now = Date.now();
+  if (now - lastSpeedSend >= SPEED_THROTTLE) {
+    socket.emit('set_speeds', { speeds });
+    lastSpeedSend = now;
+  }
+  currentSpeeds = speeds;
+  updateDisplay();
+}
+
+function sendSpeedsNow(speeds) {
   socket.emit('set_speeds', { speeds });
+  lastSpeedSend = Date.now();
   currentSpeeds = speeds;
   updateDisplay();
 }
@@ -293,6 +307,12 @@ function clientToJoy(clientX, clientY) {
     pxX: clampedX,
     pxY: clampedY,
   };
+}
+
+function flushSpeeds() {
+  const speeds = computeMotorSpeeds(joyX, joyY);
+  socket.emit('set_speeds', { speeds });
+  lastSpeedSend = Date.now();
 }
 
 function applyJoy(x, y) {
@@ -327,6 +347,7 @@ function animateJoy(startX, startY, endX, endY) {
     } else {
       animId = null;
       applyJoy(endX, endY);
+      flushSpeeds();
     }
   }
   animId = requestAnimationFrame(tick);
@@ -349,6 +370,7 @@ function animateReturn(startX, startY) {
     } else {
       animId = null;
       applyJoy(0, 0);
+      flushSpeeds();
     }
   }
   animId = requestAnimationFrame(tick);
@@ -379,6 +401,8 @@ document.addEventListener('mouseup', () => {
   active = false;
   if (autoCenter) {
     animateReturn(joyX, joyY);
+  } else {
+    flushSpeeds();
   }
 });
 
@@ -410,6 +434,8 @@ document.addEventListener('touchend', (e) => {
   active = false;
   if (autoCenter) {
     animateReturn(joyX, joyY);
+  } else {
+    flushSpeeds();
   }
 });
 
@@ -444,6 +470,7 @@ stopBtn.addEventListener('click', () => {
   active = false;
   cancelAnim();
   applyJoy(0, 0);
+  flushSpeeds();
 });
 
 const overlay = document.getElementById('reconnect-overlay');
