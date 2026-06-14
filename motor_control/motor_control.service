@@ -1,0 +1,17 @@
+[Unit]
+Description=R2 Motor Control Web Server
+After=pigpiod.service network.target
+Requires=pigpiod.service
+
+[Service]
+Type=simple
+User=r2tele
+WorkingDirectory=/home/r2tele/motor_control
+ExecStart=/usr/bin/python3 /home/r2tele/motor_control/app.py
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>R2 Control</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #1a1a2e; color: #eee; min-height: 100vh; display: flex;
+    flex-direction: column; align-items: center; padding: 16px; touch-action: none;
+    user-select: none; -webkit-user-select: none;
+  }
+  h1 { font-size: 1.5rem; margin: 8px 0 4px; color: #e94560; letter-spacing: 1px; }
+  .subtitle { font-size: 0.8rem; color: #888; margin-bottom: 8px; }
+  .connected { color: #2ecc71; }
+  .disconnected { color: #e94560; }
+
+  .joystick-area {
+    position: relative; width: 240px; height: 240px; margin: 12px auto;
+  }
+  .joystick-base {
+    width: 100%; height: 100%; border-radius: 50%;
+    background: radial-gradient(circle at 30% 30%, #16213e, #0f1629);
+    border: 3px solid #2a3a6e; position: relative;
+    box-shadow: 0 0 30px rgba(233,69,96,0.15), inset 0 0 20px rgba(0,0,0,0.5);
+    cursor: grab; touch-action: none;
+  }
+  .joystick-base:active { cursor: grabbing; }
+  .joystick-knob {
+    position: absolute; width: 64px; height: 64px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #e94560, #c0392b);
+    box-shadow: 0 4px 15px rgba(233,69,96,0.5), inset 0 -2px 6px rgba(0,0,0,0.3);
+    top: 50%; left: 50%; transform: translate(-50%, -50%);
+    transition: none; pointer-events: none; z-index: 2;
+    border: 2px solid rgba(255,255,255,0.2);
+  }
+  .joystick-knob.transition {
+    transition: transform 0.15s ease-out;
+  }
+  .center-dot {
+    position: absolute; width: 8px; height: 8px; border-radius: 50%;
+    background: rgba(255,255,255,0.15); top: 50%; left: 50%;
+    transform: translate(-50%, -50%); z-index: 1;
+  }
+  .direction-label {
+    position: absolute; font-size: 0.7rem; color: rgba(255,255,255,0.2);
+    font-weight: 600; letter-spacing: 1px;
+  }
+  .dir-fwd { top: 8px; left: 50%; transform: translateX(-50%); }
+  .dir-rev { bottom: 8px; left: 50%; transform: translateX(-50%); }
+  .dir-left { left: 8px; top: 50%; transform: translateY(-50%); }
+  .dir-right { right: 8px; top: 50%; transform: translateY(-50%); }
+
+  .controls-row {
+    display: flex; align-items: center; gap: 12px; margin: 8px 0;
+  }
+  .toggle-label {
+    display: flex; align-items: center; gap: 8px; font-size: 0.85rem;
+    cursor: pointer; color: #aaa;
+  }
+  .toggle-label.active { color: #2ecc71; }
+  .toggle-switch {
+    width: 44px; height: 24px; border-radius: 12px; background: #333;
+    position: relative; cursor: pointer; transition: background 0.2s;
+    flex-shrink: 0;
+  }
+  .toggle-switch.active { background: #2ecc71; }
+  .toggle-switch::after {
+    content: ''; position: absolute; width: 20px; height: 20px;
+    border-radius: 50%; background: #fff; top: 2px; left: 2px;
+    transition: left 0.2s;
+  }
+  .toggle-switch.active::after { left: 22px; }
+
+  .motor-display {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px;
+    margin: 8px 0; font-size: 0.8rem; font-family: 'Courier New', monospace;
+  }
+  .motor-display .m { display: flex; justify-content: space-between; gap: 8px; }
+  .motor-display .m .name { color: #888; }
+  .motor-display .m .val { color: #eee; min-width: 3em; text-align: right; }
+  .motor-display .m .val.fwd { color: #2ecc71; }
+  .motor-display .m .val.rev { color: #e94560; }
+
+  .stop-btn {
+    width: 100%; max-width: 240px; padding: 14px; margin: 8px 0;
+    background: #e94560; color: #fff; border: none; border-radius: 12px;
+    font-size: 1.2rem; font-weight: 700; letter-spacing: 2px;
+    cursor: pointer; touch-action: manipulation;
+  }
+  .stop-btn:active { background: #c0392b; transform: scale(0.97); }
+
+  .speed-row {
+    width: 100%; max-width: 240px; margin: 8px 0; display: flex;
+    flex-direction: column; gap: 2px;
+  }
+  .speed-row .slider-label {
+    display: flex; justify-content: space-between; font-size: 0.75rem; color: #888;
+  }
+  .speed-row input[type="range"] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 6px;
+    background: #333; border-radius: 3px; outline: none;
+  }
+  .speed-row input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%;
+    background: #e94560; cursor: pointer; border: 2px solid rgba(255,255,255,0.2);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  }
+  .speed-row input[type="range"]::-moz-range-thumb {
+    width: 20px; height: 20px; border-radius: 50%;
+    background: #e94560; cursor: pointer; border: 2px solid rgba(255,255,255,0.2);
+  }
+
+  .status-bar {
+    font-size: 0.7rem; color: #555; text-align: center;
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+  <h1>R2 Control</h1>
+  <div class="subtitle" id="conn-status">disconnected</div>
+
+  <div class="speed-row">
+    <div class="slider-label"><span>Joystick Speed</span><span id="speed-val">70%</span></div>
+    <input type="range" id="speed-slider" min="0" max="100" value="70">
+  </div>
+
+  <div class="speed-row">
+    <div class="slider-label"><span>Max Speed Limiter</span><span id="limiter-val">50%</span></div>
+    <input type="range" id="limiter-slider" min="0" max="100" value="50">
+  </div>
+
+  <div class="joystick-area">
+    <div class="joystick-base" id="joy-base">
+      <div class="center-dot"></div>
+      <div class="direction-label dir-fwd">▲ FWD</div>
+      <div class="direction-label dir-rev">REV ▼</div>
+      <div class="direction-label dir-left">◀ L</div>
+      <div class="direction-label dir-right">R ▶</div>
+      <div class="joystick-knob" id="joy-knob"></div>
+    </div>
+  </div>
+
+  <div class="controls-row">
+    <label class="toggle-label active" id="toggle-label">
+      <span class="toggle-switch active" id="toggle-switch"></span>
+      Auto-Center
+    </label>
+  </div>
+
+  <div class="motor-display" id="motor-display"></div>
+
+  <button class="stop-btn" id="stop-btn">STOP</button>
+  <div class="status-bar" id="status-bar"></div>
+
+<script>
+const MOTORS = ['FL', 'FR', 'RL', 'RR'];
+const MOTOR_NAMES = { FL: 'Front L', FR: 'Front R', RL: 'Rear L', RR: 'Rear R' };
+
+const knob = document.getElementById('joy-knob');
+const base = document.getElementById('joy-base');
+const connStatus = document.getElementById('conn-status');
+const statusBar = document.getElementById('status-bar');
+const stopBtn = document.getElementById('stop-btn');
+const toggleSwitch = document.getElementById('toggle-switch');
+const toggleLabel = document.getElementById('toggle-label');
+const motorDisplay = document.getElementById('motor-display');
+const speedSlider = document.getElementById('speed-slider');
+const speedVal = document.getElementById('speed-val');
+const limiterSlider = document.getElementById('limiter-slider');
+const limiterVal = document.getElementById('limiter-val');
+
+const RADIUS = 88;
+let autoCenter = true;
+let active = false;
+let joyX = 0;
+let joyY = 0;
+let currentSpeeds = { FL: 0, FR: 0, RL: 0, RR: 0 };
+
+// Build motor display
+MOTORS.forEach(m => {
+  const row = document.createElement('div');
+  row.className = 'm';
+  row.innerHTML = `<span class="name">${MOTOR_NAMES[m]}</span><span class="val" id="disp-${m}">0</span>`;
+  motorDisplay.appendChild(row);
+});
+
+function updateDisplay() {
+  MOTORS.forEach(m => {
+    const el = document.getElementById('disp-' + m);
+    const v = currentSpeeds[m];
+    el.textContent = v.toFixed(2);
+    el.className = 'val' + (v > 0 ? ' fwd' : v < 0 ? ' rev' : '');
+  });
+}
+
+function computeMotorSpeeds(x, y) {
+  const limit = parseInt(limiterSlider.value) / 100;
+  const fl = (y + x) * limit;
+  const fr = (y - x) * limit;
+  const rl = (y + x) * limit;
+  const rr = (y - x) * limit;
+  return {
+    FL: Math.max(-100, Math.min(100, fl)),
+    FR: Math.max(-100, Math.min(100, fr)),
+    RL: Math.max(-100, Math.min(100, rl)),
+    RR: Math.max(-100, Math.min(100, rr)),
+  };
+}
+
+function sendSpeeds(speeds) {
+  socket.emit('set_speeds', { speeds });
+  currentSpeeds = speeds;
+  updateDisplay();
+}
+
+function updateJoystick(clientX, clientY) {
+  const rect = base.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const dx = clientX - cx;
+  const dy = clientY - cy;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const maxDist = RADIUS;
+  let clampedX = dx;
+  let clampedY = dy;
+  if (dist > maxDist) {
+    clampedX = (dx / dist) * maxDist;
+    clampedY = (dy / dist) * maxDist;
+  }
+  joyX = (clampedX / maxDist) * 100;
+  joyY = -(clampedY / maxDist) * 100; // flip: up = positive
+  knob.style.transform = `translate(calc(-50% + ${clampedX}px), calc(-50% + ${clampedY}px))`;
+  const speeds = computeMotorSpeeds(joyX, joyY);
+  sendSpeeds(speeds);
+}
+
+let returnAnimId = null;
+
+function resetJoystick(animate) {
+  if (returnAnimId) { cancelAnimationFrame(returnAnimId); returnAnimId = null; }
+  if (animate && (joyX !== 0 || joyY !== 0)) {
+    const startX = joyX;
+    const startY = joyY;
+    const s = parseInt(speedSlider.value);
+    const duration = (100 - s) * 30 + 50;
+    const startTime = performance.now();
+
+    function tick(time) {
+      const t = Math.min((time - startTime) / duration, 1);
+      const ease = 1 - (1 - t) * (1 - t);
+      const curX = startX * (1 - ease);
+      const curY = startY * (1 - ease);
+      joyX = curX;
+      joyY = curY;
+      const maxDist = RADIUS;
+      knob.style.transform = `translate(calc(-50% + ${(curX / 100) * maxDist}px), calc(-50% + ${-(curY / 100) * maxDist}px))`;
+      const speeds = computeMotorSpeeds(curX, curY);
+      sendSpeeds(speeds);
+      if (t < 1 && !active) {
+        returnAnimId = requestAnimationFrame(tick);
+      } else {
+        returnAnimId = null;
+      }
+    }
+    returnAnimId = requestAnimationFrame(tick);
+  } else {
+    joyX = 0; joyY = 0;
+    knob.style.transform = 'translate(-50%, -50%)';
+    const speeds = { FL: 0, FR: 0, RL: 0, RR: 0 };
+    sendSpeeds(speeds);
+  }
+}
+
+// Mouse events
+base.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  if (returnAnimId) { cancelAnimationFrame(returnAnimId); returnAnimId = null; }
+  active = true;
+  updateJoystick(e.clientX, e.clientY);
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (!active) return;
+  updateJoystick(e.clientX, e.clientY);
+});
+
+document.addEventListener('mouseup', () => {
+  if (!active) return;
+  active = false;
+  if (autoCenter) resetJoystick(true);
+});
+
+// Touch events
+base.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (returnAnimId) { cancelAnimationFrame(returnAnimId); returnAnimId = null; }
+  active = true;
+  const t = e.touches[0];
+  updateJoystick(t.clientX, t.clientY);
+}, { passive: false });
+
+document.addEventListener('touchmove', (e) => {
+  if (!active) return;
+  e.preventDefault();
+  const t = e.touches[0];
+  updateJoystick(t.clientX, t.clientY);
+}, { passive: false });
+
+document.addEventListener('touchend', (e) => {
+  if (!active) return;
+  active = false;
+  if (autoCenter) resetJoystick(true);
+});
+
+// Speed slider (controls return-to-center damping)
+speedSlider.addEventListener('input', () => {
+  speedVal.textContent = speedSlider.value + '%';
+});
+
+// Speed Limiter slider (scales motor output)
+limiterSlider.addEventListener('input', () => {
+  limiterVal.textContent = limiterSlider.value + '%';
+  if (active) {
+    const speeds = computeMotorSpeeds(joyX, joyY);
+    sendSpeeds(speeds);
+  }
+});
+
+// Toggle auto-center
+toggleSwitch.addEventListener('click', () => {
+  autoCenter = !autoCenter;
+  toggleSwitch.classList.toggle('active', autoCenter);
+  toggleLabel.classList.toggle('active', autoCenter);
+  if (autoCenter && (joyX !== 0 || joyY !== 0)) resetJoystick(true);
+});
+
+// Stop button
+stopBtn.addEventListener('click', () => {
+  active = false;
+  resetJoystick(false);
+});
+
+const socket = io();
+
+socket.on('connect', () => {
+  connStatus.textContent = 'connected';
+  connStatus.className = 'subtitle connected';
+  statusBar.textContent = '';
+});
+
+socket.on('disconnect', () => {
+  connStatus.textContent = 'disconnected';
+  connStatus.className = 'subtitle disconnected';
+  statusBar.textContent = 'Connection lost.';
+});
+
+socket.on('status', () => {
+  // server echoes not used — client is the authoritative speed source
+});
+</script>
+</body>
+</html>

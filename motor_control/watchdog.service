@@ -1,0 +1,15 @@
+[Unit]
+Description=R2 Watchdog Service Monitor
+After=pigpiod.service motor_control.service
+Requires=pigpiod.service motor_control.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/r2tele/motor_control
+ExecStart=/usr/bin/python3 /home/r2tele/motor_control/watchdog.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
