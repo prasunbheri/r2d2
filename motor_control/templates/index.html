@@ -228,13 +228,14 @@ const limiterSlider = document.getElementById('limiter-slider');
 const limiterVal = document.getElementById('limiter-val');
 
 const RADIUS = 68;
-const GRAB_THRESHOLD = 6;
+const MIN_SPEED = 10;   // units/sec
+const MAX_SPEED = 300;  // units/sec
 let autoCenter = true;
 let active = false;
 let joyX = 0;
 let joyY = 0;
-let grabX = 0;
-let grabY = 0;
+let targetX = 0;
+let targetY = 0;
 let currentSpeeds = { FL: 0, FR: 0, RL: 0, RR: 0 };
 
 // Build motor display
@@ -281,11 +282,10 @@ function sendSpeeds(speeds) {
   updateDisplay();
 }
 
-function sendSpeedsNow(speeds) {
+function flushSpeeds() {
+  const speeds = computeMotorSpeeds(joyX, joyY);
   socket.emit('set_speeds', { speeds });
   lastSpeedSend = Date.now();
-  currentSpeeds = speeds;
-  updateDisplay();
 }
 
 function clientToJoy(clientX, clientY) {
@@ -309,12 +309,6 @@ function clientToJoy(clientX, clientY) {
   };
 }
 
-function flushSpeeds() {
-  const speeds = computeMotorSpeeds(joyX, joyY);
-  socket.emit('set_speeds', { speeds });
-  lastSpeedSend = Date.now();
-}
-
 function applyJoy(x, y) {
   joyX = x; joyY = y;
   const maxDist = RADIUS;
@@ -323,85 +317,66 @@ function applyJoy(x, y) {
   sendSpeeds(speeds);
 }
 
-let animId = null;
+let chaseId = null;
 
-function cancelAnim() {
-  if (animId) { cancelAnimationFrame(animId); animId = null; }
+function chaseStep() {
+  const dx = targetX - joyX;
+  const dy = targetY - joyY;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+
+  if (dist < 0.5) {
+    applyJoy(targetX, targetY);
+    chaseId = null;
+    return;
+  }
+
+  const s = parseInt(speedSlider.value);
+  const speed = MIN_SPEED + (MAX_SPEED - MIN_SPEED) * s / 100;
+  const maxMove = speed / 60;
+  const step = Math.min(maxMove / dist, 1);
+
+  applyJoy(joyX + dx * step, joyY + dy * step);
+  chaseId = requestAnimationFrame(chaseStep);
 }
 
-function animateJoy(startX, startY, endX, endY) {
-  cancelAnim();
-  const s = parseInt(speedSlider.value);
-  const duration = (100 - s) * 30 + 50;
-  const startTime = performance.now();
-
-  function tick(time) {
-    if (!active) { animId = null; return; }
-    const t = Math.min((time - startTime) / duration, 1);
-    const ease = 1 - (1 - t) * (1 - t);
-    const curX = startX + (endX - startX) * ease;
-    const curY = startY + (endY - startY) * ease;
-    applyJoy(curX, curY);
-    if (t < 1) {
-      animId = requestAnimationFrame(tick);
-    } else {
-      animId = null;
-      applyJoy(endX, endY);
-      flushSpeeds();
-    }
+function startChase(endX, endY) {
+  targetX = endX;
+  targetY = endY;
+  if (chaseId === null) {
+    chaseId = requestAnimationFrame(chaseStep);
   }
-  animId = requestAnimationFrame(tick);
 }
 
-function animateReturn(startX, startY) {
-  cancelAnim();
-  const s = parseInt(speedSlider.value);
-  const duration = (100 - s) * 30 + 50;
-  const startTime = performance.now();
-
-  function tick(time) {
-    const t = Math.min((time - startTime) / duration, 1);
-    const ease = 1 - (1 - t) * (1 - t);
-    const curX = startX * (1 - ease);
-    const curY = startY * (1 - ease);
-    applyJoy(curX, curY);
-    if (t < 1) {
-      animId = requestAnimationFrame(tick);
-    } else {
-      animId = null;
-      applyJoy(0, 0);
-      flushSpeeds();
-    }
+function stopChase() {
+  if (chaseId !== null) {
+    cancelAnimationFrame(chaseId);
+    chaseId = null;
   }
-  animId = requestAnimationFrame(tick);
 }
 
 // Mouse events
 base.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
   if (active) return;
-  cancelAnim();
+  stopChase();
   active = true;
-  grabX = e.clientX; grabY = e.clientY;
-  const target = clientToJoy(e.clientX, e.clientY);
-  animateJoy(joyX, joyY, target.joyX, target.joyY);
+  const t = clientToJoy(e.clientX, e.clientY);
+  startChase(t.joyX, t.joyY);
 });
 
 document.addEventListener('mousemove', (e) => {
   if (!active) return;
-  const dx = e.clientX - grabX, dy = e.clientY - grabY;
-  if (animId && Math.sqrt(dx * dx + dy * dy) < GRAB_THRESHOLD) return;
-  cancelAnim();
-  const target = clientToJoy(e.clientX, e.clientY);
-  applyJoy(target.joyX, target.joyY);
+  const t = clientToJoy(e.clientX, e.clientY);
+  startChase(t.joyX, t.joyY);
 });
 
 document.addEventListener('mouseup', () => {
   if (!active) return;
   active = false;
   if (autoCenter) {
-    animateReturn(joyX, joyY);
+    startChase(0, 0);
   } else {
+    // Already at targetX/targetY — flush ensures last speed is sent
     flushSpeeds();
   }
 });
@@ -410,30 +385,24 @@ document.addEventListener('mouseup', () => {
 base.addEventListener('touchstart', (e) => {
   e.preventDefault();
   if (active) return;
-  cancelAnim();
+  stopChase();
   active = true;
   const t = e.touches[0];
-  grabX = t.clientX; grabY = t.clientY;
-  const target = clientToJoy(t.clientX, t.clientY);
-  animateJoy(joyX, joyY, target.joyX, target.joyY);
+  startChase(clientToJoy(t.clientX, t.clientY).joyX, clientToJoy(t.clientX, t.clientY).joyY);
 }, { passive: false });
 
 document.addEventListener('touchmove', (e) => {
   if (!active) return;
   e.preventDefault();
   const t = e.touches[0];
-  const dx = t.clientX - grabX, dy = t.clientY - grabY;
-  if (animId && Math.sqrt(dx * dx + dy * dy) < GRAB_THRESHOLD) return;
-  cancelAnim();
-  const target = clientToJoy(t.clientX, t.clientY);
-  applyJoy(target.joyX, target.joyY);
+  startChase(clientToJoy(t.clientX, t.clientY).joyX, clientToJoy(t.clientX, t.clientY).joyY);
 }, { passive: false });
 
 document.addEventListener('touchend', (e) => {
   if (!active) return;
   active = false;
   if (autoCenter) {
-    animateReturn(joyX, joyY);
+    startChase(0, 0);
   } else {
     flushSpeeds();
   }
@@ -459,16 +428,16 @@ toggleSwitch.addEventListener('click', () => {
   toggleSwitch.classList.toggle('active', autoCenter);
   toggleLabel.classList.toggle('active', autoCenter);
   if (autoCenter && (joyX !== 0 || joyY !== 0)) {
-    cancelAnim();
     active = false;
-    animateReturn(joyX, joyY);
+    startChase(0, 0);
   }
 });
 
 // Stop button
 stopBtn.addEventListener('click', () => {
+  stopChase();
   active = false;
-  cancelAnim();
+  targetX = targetY = 0;
   applyJoy(0, 0);
   flushSpeeds();
 });
