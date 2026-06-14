@@ -118,13 +118,19 @@
   }
 
   .cam-wrap {
-    width: 100%; max-width: 240px; margin: 6px 0; border-radius: 8px;
+    width: 100%; max-width: 360px; margin: 6px 0; border-radius: 8px;
     overflow: hidden; background: #000; aspect-ratio: 4/3;
     box-shadow: 0 0 12px rgba(0,0,0,0.4);
-    flex-shrink: 0;
+    flex-shrink: 0; position: relative;
   }
   .cam-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .cam-wrap.hidden { display: none; }
+  .cam-fps {
+    position: absolute; bottom: 4px; right: 6px;
+    font-size: 0.65rem; color: rgba(255,255,255,0.6);
+    background: rgba(0,0,0,0.5); padding: 2px 5px; border-radius: 4px;
+    font-family: monospace;
+  }
 
   .status-bar {
     font-size: 0.7rem; color: #555; text-align: center;
@@ -163,23 +169,68 @@
   body:not(.disconnected) .control {
     opacity: 1; transition: opacity 0.5s ease;
   }
+
+  .gear-btn {
+    position: fixed; top: 12px; left: 12px; z-index: 100;
+    font-size: 1.4rem; background: none; border: none; color: #666;
+    cursor: pointer; touch-action: manipulation;
+  }
+
+  .conn-indicator {
+    position: fixed; top: 12px; right: 12px; z-index: 50;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+  }
+  .conn-dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+  .conn-dot.online { background: #2ecc71; box-shadow: 0 0 6px #2ecc71; }
+  .conn-dot.offline { background: #e94560; box-shadow: 0 0 6px #e94560; }
+  .conn-label {
+    font-size: 0.55rem; letter-spacing: 1px; text-transform: uppercase;
+    transition: color 0.3s;
+  }
+  .conn-label.online { color: #2ecc71; }
+  .conn-label.offline { color: #e94560; }
+
+  .settings-overlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(10, 10, 30, 0.5);
+    backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.3s ease;
+  }
+  .settings-overlay.open { opacity: 1; pointer-events: auto; }
+  .settings-box {
+    background: rgba(26, 26, 46, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px; padding: 32px 28px; width: 300px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    position: relative;
+  }
+  .settings-box .speed-row { margin-bottom: 32px; }
+  .settings-box .speed-row:last-child { margin-bottom: 0; }
+  .settings-box input[type="range"] { height: 10px; }
+  .settings-box input[type="range"]::-webkit-slider-thumb { width: 28px; height: 28px; }
+  .settings-box input[type="range"]::-moz-range-thumb { width: 28px; height: 28px; }
+  .settings-close {
+    position: absolute; top: 8px; right: 12px;
+    font-size: 1.1rem; background: none; border: none; color: #888;
+    cursor: pointer; touch-action: manipulation;
+  }
 </style>
 </head>
 <body>
+  <button class="gear-btn" id="gear-btn">⚙</button>
+  <div class="conn-indicator">
+    <div class="conn-dot offline" id="conn-dot"></div>
+    <div class="conn-label offline" id="conn-label">offline</div>
+  </div>
   <h1>R2 Control Bridge</h1>
-  <div class="subtitle" id="conn-status">disconnected</div>
   <div class="cam-wrap control hidden" id="cam-wrap">
     <img src="/video_feed" id="cam-feed" alt="camera">
-  </div>
-
-  <div class="speed-row control">
-    <div class="slider-label"><span>Joystick Speed</span><span id="speed-val">70%</span></div>
-    <input type="range" id="speed-slider" min="0" max="100" value="70">
-  </div>
-
-  <div class="speed-row control">
-    <div class="slider-label"><span>Max Speed Limiter</span><span id="limiter-val">50%</span></div>
-    <input type="range" id="limiter-slider" min="0" max="100" value="50">
+    <div class="cam-fps" id="cam-fps">-- fps</div>
   </div>
 
   <div class="joystick-area control">
@@ -206,8 +257,27 @@
   <div class="status-bar" id="status-bar"></div>
 
   <div class="overlay" id="reconnect-overlay">
-    <div class="msg">Reconnecting</div>
-    <div class="sub"><span style="color:#888">in </span><span id="reconnect-sub">5</span><span style="color:#888"> seconds</span></div>
+    <div style="font-size:0.85rem;color:#888;letter-spacing:1px">Attempting to</div>
+    <div class="msg">Reconnect</div>
+    <div class="sub"><span style="color:#888">in </span><span id="reconnect-sub">3</span><span style="color:#888"> seconds</span></div>
+  </div>
+
+  <div class="settings-overlay" id="settings-overlay">
+    <div class="settings-box">
+      <button class="settings-close" id="settings-close">✕</button>
+      <div class="speed-row">
+        <div class="slider-label"><span>Joystick Speed</span><span id="speed-val">70%</span></div>
+        <input type="range" id="speed-slider" min="0" max="100" value="70">
+      </div>
+      <div class="speed-row">
+        <div class="slider-label"><span>Max Speed Limiter</span><span id="limiter-val">50%</span></div>
+        <input type="range" id="limiter-slider" min="0" max="100" value="50">
+      </div>
+      <div class="speed-row">
+        <div class="slider-label"><span>Resolution</span><span id="res-val">640×480</span></div>
+        <input type="range" id="res-slider" min="0" max="4" value="1" step="1">
+      </div>
+    </div>
   </div>
 
 <script>
@@ -216,7 +286,8 @@ const MOTOR_NAMES = { FL: 'Front L', FR: 'Front R', RL: 'Rear L', RR: 'Rear R' }
 
 const knob = document.getElementById('joy-knob');
 const base = document.getElementById('joy-base');
-const connStatus = document.getElementById('conn-status');
+const connDot = document.getElementById('conn-dot');
+const connLabel = document.getElementById('conn-label');
 const statusBar = document.getElementById('status-bar');
 const stopBtn = document.getElementById('stop-btn');
 const toggleSwitch = document.getElementById('toggle-switch');
@@ -226,6 +297,9 @@ const speedSlider = document.getElementById('speed-slider');
 const speedVal = document.getElementById('speed-val');
 const limiterSlider = document.getElementById('limiter-slider');
 const limiterVal = document.getElementById('limiter-val');
+const resSlider = document.getElementById('res-slider');
+const resVal = document.getElementById('res-val');
+const RES_LABELS = ['320×240', '640×480', '800×600', '1024×768', '1280×960'];
 
 const RADIUS = 68;
 const MIN_SPEED = 10;   // units/sec
@@ -422,6 +496,35 @@ limiterSlider.addEventListener('input', () => {
   }
 });
 
+// Resolution slider
+resSlider.addEventListener('input', async () => {
+  const idx = parseInt(resSlider.value);
+  resVal.textContent = RES_LABELS[idx];
+  try {
+    const r = await fetch('/api/set_resolution', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({index: idx}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      const cam = document.getElementById('cam-feed');
+      cam.src = '/video_feed?' + Date.now();
+    }
+  } catch (_) {}
+});
+
+// FPS counter via camera_status polling
+const fpsEl = document.getElementById('cam-fps');
+let fpsPoll = setInterval(async () => {
+  try {
+    const r = await fetch('/api/camera_status');
+    const d = await r.json();
+    const fps = d.fps || 0;
+    fpsEl.textContent = (fps < 2 ? fps.toFixed(2) : Math.round(fps)) + ' fps';
+  } catch (_) {}
+}, 1000);
+
 // Toggle auto-center
 toggleSwitch.addEventListener('click', () => {
   autoCenter = !autoCenter;
@@ -442,11 +545,20 @@ stopBtn.addEventListener('click', () => {
   flushSpeeds();
 });
 
+// Gear button – toggle settings overlay
+document.getElementById('gear-btn').addEventListener('click', () => {
+  document.getElementById('settings-overlay').classList.toggle('open');
+});
+document.getElementById('settings-close').addEventListener('click', () => {
+  document.getElementById('settings-overlay').classList.remove('open');
+});
+
 const overlay = document.getElementById('reconnect-overlay');
 const reconnectSub = document.getElementById('reconnect-sub');
 
 let countdownTimer = null;
-let countdown = 5;
+let countdown = 3;
+let countdownPause = false;
 
 const socket = io({
   reconnectionDelay: 5000,
@@ -455,35 +567,45 @@ const socket = io({
 });
 
 socket.on('connect', () => {
+  countdownPause = false;
   if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
   document.body.classList.remove('disconnected');
   overlay.classList.remove('visible');
-  connStatus.textContent = 'connected';
-  connStatus.className = 'subtitle connected';
+  connDot.className = 'conn-dot online';
+  connLabel.textContent = 'online';
+  connLabel.className = 'conn-label online';
   statusBar.textContent = '';
   const cam = document.getElementById('cam-feed');
   if (cam) cam.src = '/video_feed?' + Date.now();
 });
 
 socket.on('disconnect', () => {
-  countdown = 5;
-  reconnectSub.textContent = '5';
+  countdown = 3;
+  reconnectSub.textContent = '3';
   document.body.classList.add('disconnected');
   overlay.classList.add('visible');
-  connStatus.textContent = 'disconnected';
-  connStatus.className = 'subtitle disconnected';
+  connDot.className = 'conn-dot offline';
+  connLabel.textContent = 'offline';
+  connLabel.className = 'conn-label offline';
   statusBar.textContent = 'Connection lost.';
   if (countdownTimer) clearInterval(countdownTimer);
   countdownTimer = setInterval(() => {
+    if (countdownPause) return;
     countdown--;
-    if (countdown < 0) countdown = 5;
+    if (countdown < 0) {
+      countdownPause = true;
+      reconnectSub.textContent = '';
+      setTimeout(() => { countdown = 3; reconnectSub.textContent = 3; countdownPause = false; }, 1000);
+      return;
+    }
     reconnectSub.textContent = countdown;
   }, 1000);
 });
 
 socket.io.on('reconnect_attempt', () => {
-  countdown = 5;
-  reconnectSub.textContent = '5';
+  countdownPause = false;
+  countdown = 3;
+  reconnectSub.textContent = '3';
 });
 
 socket.on('camera_status', (data) => {
