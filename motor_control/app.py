@@ -1,4 +1,3 @@
-import io
 import logging
 import os
 import socket
@@ -57,6 +56,31 @@ def get_ip():
         return '127.0.0.1'
 
 
+def _make_camera_output():
+    """Create an Output that stores the latest HW-encoded MJPEG frame."""
+    from picamera2.outputs import Output
+
+    class _CircularOutput(Output):
+        def outputframe(self, frame, keyframe=True, timestamp=None, packet=None, audio=False):
+            global latest_frame, camera_fps, _last_frame_time
+            latest_frame = bytes(frame)
+            now = time.time()
+            dt = now - _last_frame_time
+            if dt >= 0.01:
+                camera_fps = 1.0 / dt
+            _last_frame_time = now
+
+    return _CircularOutput()
+
+
+def _start_recording():
+    """Configure camera and start HW MJPEG recording via V4L2 encoder."""
+    from picamera2.encoders import MJPEGEncoder, Quality
+    encoder = MJPEGEncoder()
+    output = _make_camera_output()
+    camera.start_recording(encoder, output, quality=Quality.VERY_HIGH)
+
+
 def init_camera():
     global camera, camera_available
     try:
@@ -64,36 +88,17 @@ def init_camera():
         w, h = RESOLUTIONS[current_resolution]
         camera = Picamera2()
         config = camera.create_video_configuration(
-            main={"size": (w, h)},
-            controls={"FrameDurationLimits": (33333, 33333)},
+            main={"size": (w, h), "format": "YUV420"},
+            controls={"FrameDurationLimits": (16666, 16666)},
         )
         camera.configure(config)
         camera.start()
+        _start_recording()
         camera_available = True
-        logger.info('Camera online %dx%d MJPEG', w, h)
+        logger.info('Camera online %dx%d HW MJPEG', w, h)
     except Exception as e:
         camera_available = False
         logger.error('Camera unavailable: %s', e)
-
-
-def camera_capture_loop():
-    global latest_frame, camera_fps, _last_frame_time
-    while camera_available:
-        try:
-            buf = io.BytesIO()
-            with camera_lock:
-                if camera_available:
-                    camera.capture_file(buf, format='jpeg')
-            buf.seek(0)
-            latest_frame = buf.getvalue()
-            now = time.time()
-            dt = now - _last_frame_time
-            if dt >= 0.01:
-                camera_fps = 1.0 / dt
-            _last_frame_time = now
-        except Exception:
-            time.sleep(0.1)
-        time.sleep(0.1)
 
 
 @app.route('/api/camera_status')
@@ -110,17 +115,19 @@ def api_set_resolution():
         return jsonify({'ok': False, 'error': 'camera unavailable'}), 503
     w, h = RESOLUTIONS[res_idx]
     with camera_lock:
+        camera.stop_recording()
         camera.stop()
         time.sleep(0.2)
         config = camera.create_video_configuration(
-            main={"size": (w, h)},
-            controls={"FrameDurationLimits": (33333, 33333)},
+            main={"size": (w, h), "format": "YUV420"},
+            controls={"FrameDurationLimits": (16666, 16666)},
         )
         camera.configure(config)
         camera.start()
+        _start_recording()
         current_resolution = res_idx
         latest_frame = None
-        logger.info('Camera reconfigured to %dx%d', w, h)
+        logger.info('Camera reconfigured to %dx%d HW MJPEG', w, h)
     return jsonify({'ok': True, 'resolution': (w, h)})
 
 @app.route('/api/shutdown', methods=['POST'])
@@ -206,11 +213,8 @@ def init_camera_async():
     global camera_available
     try:
         init_camera()
-        if camera_available:
-            th = threading.Thread(target=camera_capture_loop, daemon=True)
-            th.start()
-            logger.info('Camera capture loop started')
     except Exception as e:
+        camera_available = False
         logger.error('Camera init thread error: %s', e)
 
 
