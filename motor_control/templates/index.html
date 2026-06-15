@@ -692,16 +692,16 @@ document.addEventListener('touchend', shutdownAbort);
 document.addEventListener('mouseleave', shutdownAbort);
 document.addEventListener('touchcancel', shutdownAbort);
 
-// FPS counter via camera_status polling
+// FPS counter via camera_status polling (2s interval to reduce server load)
 const fpsEl = document.getElementById('cam-fps');
 let fpsPoll = setInterval(async () => {
   try {
     const r = await fetch('/api/camera_status');
     const d = await r.json();
     const fps = d.fps || 0;
-    fpsEl.textContent = (fps < 2 ? fps.toFixed(2) : Math.round(fps)) + ' fps';
+    fpsEl.textContent = Math.round(fps) + ' fps';
   } catch (_) {}
-}, 1000);
+}, 2000);
 
 // Toggle auto-center
 toggleSwitch.addEventListener('click', () => {

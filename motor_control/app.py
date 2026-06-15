@@ -47,6 +47,11 @@ target_fps = 12  # desired framerate; None = uncapped
 _fps_controls = None  # (min_dur, max_dur) last applied via set_controls
 _fps_lock = threading.Lock()
 
+_mem_cache = {}  # cached /proc/meminfo dict
+_mem_cache_time = 0.0
+
+_template_size = 0  # cached size of templates/index.html
+
 
 def get_ip():
     try:
@@ -66,7 +71,7 @@ def _make_camera_output():
     class _CircularOutput(Output):
         def outputframe(self, frame, keyframe=True, timestamp=None, packet=None, audio=False):
             global latest_frame, camera_fps, _last_frame_time
-            latest_frame = bytes(frame)
+            latest_frame = frame
             now = time.time()
             dt = now - _last_frame_time
             if dt >= 0.01:
@@ -173,7 +178,6 @@ def api_shutdown():
 
 @app.route('/api/debug')
 def api_debug():
-    import os
     return jsonify({
         'root_path': app.root_path,
         'template_folder': app.template_folder,
@@ -181,18 +185,18 @@ def api_debug():
         'camera_available': camera_available,
         'camera_fps': camera_fps,
         'camera_resolution': RESOLUTIONS[current_resolution],
-        'file_size': os.path.getsize(os.path.join(app.root_path, 'templates', 'index.html')),
+        'file_size': _template_size,
     })
 
 _stats_prev = {'tx_bytes': None, 'rx_bytes': None, 'time': 0.0}
 _stats_lock = threading.Lock()
 
-@app.route('/api/stats')
-def api_stats():
+def _read_meminfo():
+    global _mem_cache, _mem_cache_time
+    now = time.time()
+    if now - _mem_cache_time < 3.0:
+        return _mem_cache
     mem = {}
-    load = []
-    net = {}
-    temp = ''
     try:
         with open('/proc/meminfo') as f:
             for line in f:
@@ -201,6 +205,16 @@ def api_stats():
                     mem[parts[0]] = parts[1].strip()
     except Exception:
         mem = {'error': 'unavailable'}
+    _mem_cache = mem
+    _mem_cache_time = now
+    return mem
+
+@app.route('/api/stats')
+def api_stats():
+    load = []
+    net = {}
+    temp = ''
+    mem = _read_meminfo()
     try:
         with open('/proc/loadavg') as f:
             load = f.read().strip().split()[:3]
@@ -269,7 +283,12 @@ def video_feed():
                 frame = latest_frame
                 if frame is not None:
                     yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-                time.sleep(0.03)
+                fps = target_fps
+                if fps is None:
+                    sleep_time = 0.016
+                else:
+                    sleep_time = 1.0 / fps * 0.8
+                time.sleep(max(0.01, min(1.0, sleep_time)))
         except GeneratorExit:
             pass
     return Response(stream_with_context(generate()),
@@ -319,7 +338,7 @@ def init_camera_async():
 
 
 def main():
-    global controller
+    global controller, _template_size
     try:
         controller = MotorController()
     except ConnectionError as e:
@@ -334,6 +353,10 @@ def main():
 
     ip = get_ip()
     port = 5000
+    try:
+        _template_size = os.path.getsize(os.path.join(app.root_path, 'templates', 'index.html'))
+    except Exception:
+        _template_size = 0
     logger.info('=' * 40)
     logger.info('R2 Motor Controller v2 starting')
     logger.info('http://%s:%d', ip, port)
@@ -341,7 +364,7 @@ def main():
     logger.info('Motors: %s', ', '.join(MOTOR_NAMES))
     logger.info('Camera initializing in background...')
     logger.info('=' * 40)
-    serve(app, host='0.0.0.0', port=port, threads=8)
+    serve(app, host='0.0.0.0', port=port, threads=4)
 
 
 if __name__ == '__main__':
