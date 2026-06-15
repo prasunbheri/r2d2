@@ -229,6 +229,51 @@
   .shutdown-btn:active { background: #a93226; }
   .shutdown-btn.holding { background: #e67e22; }
   .shutdown-btn.holding:active { background: #d35400; }
+  .stats-btn {
+    display: block; padding: 6px 12px; margin: 8px auto 0;
+    background: #2a3a6e; color: #aaa; border: none; border-radius: 6px;
+    font-size: 0.75rem; font-weight: 600; letter-spacing: 1px;
+    cursor: pointer; touch-action: manipulation;
+  }
+  .stats-btn:active { background: #1e2d5a; }
+
+  .stats-overlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(10, 10, 30, 0.5);
+    backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.3s ease;
+  }
+  .stats-overlay.open { opacity: 1; pointer-events: auto; }
+  .stats-box {
+    background: rgba(26, 26, 46, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px; padding: 28px 24px; width: 300px;
+    max-height: 80vh; overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    position: relative;
+  }
+  .stats-close {
+    position: absolute; top: 8px; right: 12px;
+    font-size: 1.1rem; background: none; border: none; color: #888;
+    cursor: pointer; touch-action: manipulation;
+  }
+  .stats-row {
+    display: flex; justify-content: space-between; padding: 7px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    font-size: 0.85rem;
+  }
+  .stats-row:last-child { border-bottom: none; }
+  .stats-label { color: #888; }
+  .stats-value { color: #eee; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .stats-back {
+    display: block; padding: 6px 12px; margin: 14px auto 0;
+    background: #2a3a6e; color: #ccc; border: none; border-radius: 6px;
+    font-size: 0.75rem; font-weight: 600; letter-spacing: 1px;
+    cursor: pointer; touch-action: manipulation;
+  }
+  .stats-back:active { background: #1e2d5a; }
 
   /* Landscape: video fills left, right column has joystick + controls below */
   @media (orientation: landscape) and (max-height: 500px) {
@@ -328,7 +373,28 @@
         <div class="slider-label"><span>Resolution</span><span id="res-val">640×480</span></div>
         <input type="range" id="res-slider" min="0" max="4" value="1" step="1">
       </div>
+      <div class="speed-row">
+        <div class="slider-label"><span>Frame Rate</span><span id="fps-val">12 FPS</span></div>
+        <input type="range" id="fps-slider" min="0" max="60" value="11" step="1">
+      </div>
       <button class="shutdown-btn" id="shutdown-btn">Shutdown Pi</button>
+      <button class="stats-btn" id="stats-btn">Stats</button>
+    </div>
+  </div>
+
+  <div class="stats-overlay" id="stats-overlay">
+    <div class="stats-box">
+      <button class="stats-close" id="stats-close">✕</button>
+      <div class="stats-row"><span class="stats-label">Camera FPS</span><span class="stats-value" id="s-fps">--</span></div>
+      <div class="stats-row"><span class="stats-label">Frame Rate</span><span class="stats-value" id="s-fps-target">--</span></div>
+      <div class="stats-row"><span class="stats-label">Resolution</span><span class="stats-value" id="s-res">--</span></div>
+      <div class="stats-row"><span class="stats-label">CPU (1m)</span><span class="stats-value" id="s-cpu">--</span></div>
+      <div class="stats-row"><span class="stats-label">Memory</span><span class="stats-value" id="s-mem">--</span></div>
+      <div class="stats-row"><span class="stats-label">Temperature</span><span class="stats-value" id="s-temp">--</span></div>
+      <div class="stats-row"><span class="stats-label">TX Rate</span><span class="stats-value" id="s-tx">--</span></div>
+      <div class="stats-row"><span class="stats-label">RX Rate</span><span class="stats-value" id="s-rx">--</span></div>
+      <div class="stats-row"><span class="stats-label">Threads</span><span class="stats-value" id="s-threads">--</span></div>
+      <button class="stats-back" id="stats-back">Back to Settings</button>
     </div>
   </div>
 
@@ -352,6 +418,9 @@ const limiterVal = document.getElementById('limiter-val');
 const resSlider = document.getElementById('res-slider');
 const resVal = document.getElementById('res-val');
 const RES_LABELS = ['320×240', '640×480', '800×600', '1024×768', '1280×960'];
+const fpsSlider = document.getElementById('fps-slider');
+const fpsVal = document.getElementById('fps-val');
+function fpsLabel(v) { return v == 60 ? 'Uncapped' : (v + 1) + ' FPS'; }
 
 const RADIUS = 68;
 const MIN_SPEED = 10;   // units/sec
@@ -566,6 +635,19 @@ resSlider.addEventListener('input', async () => {
   } catch (_) {}
 });
 
+// Frame rate slider
+fpsSlider.addEventListener('input', async () => {
+  const v = parseInt(fpsSlider.value);
+  fpsVal.textContent = fpsLabel(v);
+  try {
+    await fetch('/api/set_framerate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({fps: v}),
+    });
+  } catch (_) {}
+});
+
 // Shutdown button – long press 5s then confirm
 const shutdownBtn = document.getElementById('shutdown-btn');
 let shutdownTimer = null;
@@ -648,6 +730,41 @@ document.getElementById('gear-btn').addEventListener('click', () => {
 document.getElementById('settings-close').addEventListener('click', () => {
   document.getElementById('settings-overlay').classList.remove('open');
 });
+
+// Stats overlay
+const statsOverlay = document.getElementById('stats-overlay');
+const settingsOverlay = document.getElementById('settings-overlay');
+let statsInterval = null;
+async function fetchStats() {
+  try {
+    const r = await fetch('/api/stats');
+    const d = await r.json();
+    document.getElementById('s-fps').textContent = d.fps;
+    document.getElementById('s-fps-target').textContent = d.fps_target;
+    document.getElementById('s-res').textContent = d.resolution.join('\u00d7');
+    document.getElementById('s-cpu').textContent = (parseFloat(d.load[0]) * 100).toFixed(0) + '%';
+    const mt = parseInt(d.memory.MemTotal) / 1024 || 0;
+    const ma = parseInt(d.memory.MemAvailable) / 1024 || 0;
+    document.getElementById('s-mem').textContent = ma.toFixed(0) + ' / ' + mt.toFixed(0) + ' MB';
+    document.getElementById('s-temp').textContent = d.temp.replace('temp=', '');
+    document.getElementById('s-tx').textContent = d.tx_rate_kbps < 1000 ? d.tx_rate_kbps + ' KB/s' : (d.tx_rate_kbps / 1024).toFixed(1) + ' MB/s';
+    document.getElementById('s-rx').textContent = d.rx_rate_kbps < 1000 ? d.rx_rate_kbps + ' KB/s' : (d.rx_rate_kbps / 1024).toFixed(1) + ' MB/s';
+    document.getElementById('s-threads').textContent = d.thread_count;
+  } catch (_) {}
+}
+document.getElementById('stats-btn').addEventListener('click', () => {
+  settingsOverlay.classList.remove('open');
+  statsOverlay.classList.add('open');
+  fetchStats();
+  if (!statsInterval) statsInterval = setInterval(fetchStats, 5000);
+});
+function closeStats() {
+  statsOverlay.classList.remove('open');
+  settingsOverlay.classList.add('open');
+  if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
+}
+document.getElementById('stats-close').addEventListener('click', closeStats);
+document.getElementById('stats-back').addEventListener('click', closeStats);
 
 const overlay = document.getElementById('reconnect-overlay');
 const reconnectSub = document.getElementById('reconnect-sub');

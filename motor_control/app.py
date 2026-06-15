@@ -43,6 +43,9 @@ _last_frame_time = 0.0
 
 RESOLUTIONS = [(320, 240), (640, 480), (800, 600), (1024, 768), (1280, 960)]
 current_resolution = 1  # index into RESOLUTIONS
+target_fps = 12  # desired framerate; None = uncapped
+_fps_controls = None  # (min_dur, max_dur) last applied via set_controls
+_fps_lock = threading.Lock()
 
 
 def get_ip():
@@ -81,6 +84,21 @@ def _start_recording():
     camera.start_recording(encoder, output, quality=Quality.VERY_HIGH)
 
 
+def _apply_framerate():
+    global target_fps, _fps_controls
+    with _fps_lock:
+        if target_fps is None:
+            ctrl = (1, 200000)
+        else:
+            dur = max(16666, int(1_000_000 / target_fps))
+            ctrl = (dur, dur)
+        try:
+            camera.set_controls({"FrameDurationLimits": ctrl})
+            _fps_controls = ctrl
+        except Exception:
+            logger.warning('set_controls FrameDurationLimits failed')
+
+
 def init_camera():
     global camera, camera_available
     try:
@@ -89,11 +107,11 @@ def init_camera():
         camera = Picamera2()
         config = camera.create_video_configuration(
             main={"size": (w, h), "format": "YUV420"},
-            controls={"FrameDurationLimits": (16666, 16666)},
         )
         camera.configure(config)
         camera.start()
         _start_recording()
+        _apply_framerate()
         camera_available = True
         logger.info('Camera online %dx%d HW MJPEG', w, h)
     except Exception as e:
@@ -120,15 +138,32 @@ def api_set_resolution():
         time.sleep(0.2)
         config = camera.create_video_configuration(
             main={"size": (w, h), "format": "YUV420"},
-            controls={"FrameDurationLimits": (16666, 16666)},
         )
         camera.configure(config)
         camera.start()
         _start_recording()
+        _apply_framerate()
         current_resolution = res_idx
         latest_frame = None
         logger.info('Camera reconfigured to %dx%d HW MJPEG', w, h)
     return jsonify({'ok': True, 'resolution': (w, h)})
+
+@app.route('/api/set_framerate', methods=['POST'])
+def api_set_framerate():
+    global target_fps, camera_available
+    val = request.json.get('fps')
+    if not isinstance(val, int) or val < 0 or val > 60:
+        return jsonify({'ok': False, 'error': 'invalid fps'}), 400
+    with _fps_lock:
+        if val == 60:
+            target_fps = None
+        else:
+            target_fps = val + 1
+    if camera_available:
+        with camera_lock:
+            _apply_framerate()
+    logger.info('Framerate set to %s', target_fps if target_fps else 'uncapped')
+    return jsonify({'ok': True, 'fps': target_fps if target_fps else 'uncapped'})
 
 @app.route('/api/shutdown', methods=['POST'])
 def api_shutdown():
@@ -147,6 +182,71 @@ def api_debug():
         'camera_fps': camera_fps,
         'camera_resolution': RESOLUTIONS[current_resolution],
         'file_size': os.path.getsize(os.path.join(app.root_path, 'templates', 'index.html')),
+    })
+
+_stats_prev = {'tx_bytes': None, 'rx_bytes': None, 'time': 0.0}
+_stats_lock = threading.Lock()
+
+@app.route('/api/stats')
+def api_stats():
+    mem = {}
+    load = []
+    net = {}
+    temp = ''
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                parts = line.split(':')
+                if parts[0] in ('MemTotal', 'MemFree', 'MemAvailable', 'Buffers', 'Cached'):
+                    mem[parts[0]] = parts[1].strip()
+    except Exception:
+        mem = {'error': 'unavailable'}
+    try:
+        with open('/proc/loadavg') as f:
+            load = f.read().strip().split()[:3]
+    except Exception:
+        load = ['?', '?', '?']
+    try:
+        with open('/proc/net/dev') as f:
+            for line in f:
+                if 'wlan' in line:
+                    parts = line.strip().split()
+                    name = parts[0].rstrip(':')
+                    rx_bytes = int(parts[1])
+                    tx_bytes = int(parts[9])
+                    net[name] = {'rx_bytes': rx_bytes, 'tx_bytes': tx_bytes}
+    except Exception:
+        net = {'error': 'unavailable'}
+    try:
+        import subprocess
+        temp = subprocess.run(['vcgencmd', 'measure_temp'], capture_output=True, text=True, timeout=2).stdout.strip()
+    except Exception:
+        temp = '?'
+
+    now = time.time()
+    tx_rate = rx_rate = 0.0
+    with _stats_lock:
+        prev = _stats_prev
+        if net and 'wlan0' in net and prev['tx_bytes'] is not None:
+            dt = now - prev['time']
+            if dt >= 1.0:
+                tx_rate = (net['wlan0']['tx_bytes'] - prev['tx_bytes']) / dt / 1024
+                rx_rate = (net['wlan0']['rx_bytes'] - prev['rx_bytes']) / dt / 1024
+        if net and 'wlan0' in net:
+            prev['tx_bytes'] = net['wlan0']['tx_bytes']
+            prev['rx_bytes'] = net['wlan0']['rx_bytes']
+            prev['time'] = now
+
+    return jsonify({
+        'memory': mem,
+        'load': load,
+        'temp': temp,
+        'tx_rate_kbps': round(tx_rate, 1),
+        'rx_rate_kbps': round(rx_rate, 1),
+        'fps': round(camera_fps, 1) if camera_available else 0,
+        'thread_count': threading.active_count(),
+        'resolution': list(RESOLUTIONS[current_resolution]),
+        'fps_target': target_fps if target_fps is not None else 'uncapped',
     })
 
 
