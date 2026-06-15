@@ -91,6 +91,8 @@ def _start_recording():
 
 def _apply_framerate():
     global target_fps, _fps_controls
+    if target_fps == 0:
+        return
     with _fps_lock:
         if target_fps is None:
             ctrl = (1, 200000)
@@ -104,8 +106,8 @@ def _apply_framerate():
             logger.warning('set_controls FrameDurationLimits failed')
 
 
-def init_camera():
-    global camera, camera_available
+def _start_camera():
+    global camera, camera_available, latest_frame
     try:
         from picamera2 import Picamera2
         w, h = RESOLUTIONS[current_resolution]
@@ -116,9 +118,47 @@ def init_camera():
         camera.configure(config)
         camera.start()
         _start_recording()
-        _apply_framerate()
+        if target_fps != 0:
+            _apply_framerate()
         camera_available = True
+        latest_frame = None
+        sio.emit('camera_status', {'available': True})
         logger.info('Camera online %dx%d HW MJPEG', w, h)
+    except Exception as e:
+        camera_available = False
+        logger.error('Camera start failed: %s', e)
+
+
+def _stop_camera():
+    global camera, camera_available, latest_frame, camera_fps, _last_frame_time
+    with camera_lock:
+        if not camera_available or camera is None:
+            return
+        try:
+            camera.stop_recording()
+        except Exception:
+            pass
+        try:
+            camera.stop()
+        except Exception:
+            pass
+        try:
+            camera.close()
+        except Exception:
+            pass
+        camera = None
+        camera_available = False
+        latest_frame = None
+        camera_fps = 0.0
+        _last_frame_time = 0.0
+        sio.emit('camera_status', {'available': False})
+        logger.info('Camera stopped')
+
+
+def init_camera():
+    global camera_available
+    try:
+        _start_camera()
     except Exception as e:
         camera_available = False
         logger.error('Camera unavailable: %s', e)
@@ -160,15 +200,24 @@ def api_set_framerate():
     if not isinstance(val, int) or val < 0 or val > 60:
         return jsonify({'ok': False, 'error': 'invalid fps'}), 400
     with _fps_lock:
-        if val == 60:
+        if val == 0:
+            target_fps = 0
+        elif val == 60:
             target_fps = None
         else:
-            target_fps = val + 1
-    if camera_available:
-        with camera_lock:
-            _apply_framerate()
-    logger.info('Framerate set to %s', target_fps if target_fps else 'uncapped')
-    return jsonify({'ok': True, 'fps': target_fps if target_fps else 'uncapped'})
+            target_fps = val
+    if val == 0:
+        if camera_available:
+            _stop_camera()
+    else:
+        if not camera_available:
+            _start_camera()
+        else:
+            with camera_lock:
+                _apply_framerate()
+    label = 'off' if val == 0 else (str(target_fps) if target_fps else 'uncapped')
+    logger.info('Framerate set to %s', label)
+    return jsonify({'ok': True, 'fps': label})
 
 @app.route('/api/shutdown', methods=['POST'])
 def api_shutdown():
@@ -284,8 +333,8 @@ def video_feed():
                 if frame is not None:
                     yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
                 fps = target_fps
-                if fps is None:
-                    sleep_time = 0.016
+                if fps is None or fps == 0:
+                    sleep_time = 0.1
                 else:
                     sleep_time = 1.0 / fps * 0.8
                 time.sleep(max(0.01, min(1.0, sleep_time)))

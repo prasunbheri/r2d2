@@ -220,22 +220,15 @@
     font-size: 1.1rem; background: none; border: none; color: #888;
     cursor: pointer; touch-action: manipulation;
   }
-  .shutdown-btn {
-    display: block; padding: 6px 12px; margin: 12px auto 0;
-    background: #c0392b; color: #fff; border: none; border-radius: 6px;
-    font-size: 0.75rem; font-weight: 600; letter-spacing: 1px;
-    cursor: pointer; touch-action: manipulation;
+  .menu-corner-btn {
+    position: absolute; background: none; border: none; cursor: pointer;
+    font-size: 1.3rem; touch-action: manipulation; color: #666;
+    padding: 8px; line-height: 1; transition: color 0.15s;
   }
-  .shutdown-btn:active { background: #a93226; }
-  .shutdown-btn.holding { background: #e67e22; }
-  .shutdown-btn.holding:active { background: #d35400; }
-  .stats-btn {
-    display: block; padding: 6px 12px; margin: 8px auto 0;
-    background: #2a3a6e; color: #aaa; border: none; border-radius: 6px;
-    font-size: 0.75rem; font-weight: 600; letter-spacing: 1px;
-    cursor: pointer; touch-action: manipulation;
-  }
-  .stats-btn:active { background: #1e2d5a; }
+  .menu-corner-btn:active { color: #e94560; }
+  .menu-corner-btn.holding { color: #e67e22; }
+  .menu-bottom-left { bottom: 6px; left: 6px; }
+  .menu-bottom-right { bottom: 6px; right: 6px; }
 
   .stats-overlay {
     position: fixed; inset: 0; z-index: 200;
@@ -375,10 +368,10 @@
       </div>
       <div class="speed-row">
         <div class="slider-label"><span>Frame Rate</span><span id="fps-val">12 FPS</span></div>
-        <input type="range" id="fps-slider" min="0" max="60" value="11" step="1">
+        <input type="range" id="fps-slider" min="0" max="60" value="12" step="1">
       </div>
-      <button class="shutdown-btn" id="shutdown-btn">Shutdown Pi</button>
-      <button class="stats-btn" id="stats-btn">Stats</button>
+      <button class="menu-corner-btn menu-bottom-left" id="shutdown-btn">⏻</button>
+      <button class="menu-corner-btn menu-bottom-right" id="stats-btn">ℹ</button>
     </div>
   </div>
 
@@ -420,7 +413,7 @@ const resVal = document.getElementById('res-val');
 const RES_LABELS = ['320×240', '640×480', '800×600', '1024×768', '1280×960'];
 const fpsSlider = document.getElementById('fps-slider');
 const fpsVal = document.getElementById('fps-val');
-function fpsLabel(v) { return v == 60 ? 'Uncapped' : (v + 1) + ' FPS'; }
+function fpsLabel(v) { return v == 0 ? 'Off' : (v == 60 ? 'Uncapped' : v + ' FPS'); }
 
 const RADIUS = 68;
 const MIN_SPEED = 10;   // units/sec
@@ -648,7 +641,7 @@ fpsSlider.addEventListener('input', async () => {
   } catch (_) {}
 });
 
-// Shutdown button – long press 5s then confirm
+// Shutdown button – 5s long-press, icon countdown
 const shutdownBtn = document.getElementById('shutdown-btn');
 let shutdownTimer = null;
 let shutdownCountdown = 0;
@@ -658,7 +651,7 @@ function shutdownAbort() {
   if (!shutdownHolding) return;
   shutdownHolding = false;
   clearInterval(shutdownTimer);
-  shutdownBtn.textContent = 'Shutdown Pi';
+  shutdownBtn.innerHTML = '⏻';
   shutdownBtn.classList.remove('holding');
 }
 
@@ -666,13 +659,13 @@ function shutdownStart() {
   if (shutdownHolding) return;
   shutdownHolding = true;
   shutdownCountdown = 5;
-  shutdownBtn.textContent = 'Hold 5…';
+  shutdownBtn.textContent = '5';
   shutdownBtn.classList.add('holding');
   shutdownTimer = setInterval(() => {
     shutdownCountdown--;
     if (shutdownCountdown <= 0) {
       clearInterval(shutdownTimer);
-      shutdownBtn.textContent = 'Shutdown Pi';
+      shutdownBtn.innerHTML = '⏻';
       shutdownBtn.classList.remove('holding');
       shutdownHolding = false;
       if (confirm('Shut down the Pi?')) {
@@ -681,7 +674,7 @@ function shutdownStart() {
       }
       return;
     }
-    shutdownBtn.textContent = 'Hold ' + shutdownCountdown + '…';
+    shutdownBtn.textContent = shutdownCountdown;
   }, 1000);
 }
 
@@ -827,26 +820,31 @@ socket.on('camera_status', (data) => {
   if (data.available) {
     camWrap.classList.remove('hidden');
     cam.src = '/video_feed?' + Date.now();
+    if (camPoll) { clearInterval(camPoll); camPoll = null; }
   } else {
     camWrap.classList.add('hidden');
+    if (!camPoll) startCamPoll();
   }
 });
 
-// Poll HTTP endpoint for camera status (covers clients already
-// connected when camera finishes initializing in the background).
-let camPoll = setInterval(async () => {
-  try {
-    const r = await fetch('/api/camera_status');
-    const d = await r.json();
-    if (d.available) {
-      clearInterval(camPoll); camPoll = null;
-      const camWrap = document.getElementById('cam-wrap');
-      const cam = document.getElementById('cam-feed');
-      camWrap.classList.remove('hidden');
-      cam.src = '/video_feed?' + Date.now();
-    }
-  } catch (_) {}
-}, 3000);
+let camPoll = null;
+function startCamPoll() {
+  if (camPoll) return;
+  camPoll = setInterval(async () => {
+    try {
+      const r = await fetch('/api/camera_status');
+      const d = await r.json();
+      if (d.available) {
+        clearInterval(camPoll); camPoll = null;
+        const camWrap = document.getElementById('cam-wrap');
+        const cam = document.getElementById('cam-feed');
+        camWrap.classList.remove('hidden');
+        cam.src = '/video_feed?' + Date.now();
+      }
+    } catch (_) {}
+  }, 3000);
+}
+startCamPoll();
 
 socket.on('status', () => {
   // server echoes not used — client is the authoritative speed source
