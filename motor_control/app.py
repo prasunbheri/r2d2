@@ -108,25 +108,26 @@ def _apply_framerate():
 
 def _start_camera():
     global camera, camera_available, latest_frame
-    try:
-        from picamera2 import Picamera2
-        w, h = RESOLUTIONS[current_resolution]
-        camera = Picamera2()
-        config = camera.create_video_configuration(
-            main={"size": (w, h), "format": "YUV420"},
-        )
-        camera.configure(config)
-        camera.start()
-        _start_recording()
-        if target_fps != 0:
-            _apply_framerate()
-        camera_available = True
-        latest_frame = None
-        sio.emit('camera_status', {'available': True})
-        logger.info('Camera online %dx%d HW MJPEG', w, h)
-    except Exception as e:
-        camera_available = False
-        logger.error('Camera start failed: %s', e)
+    with camera_lock:
+        try:
+            from picamera2 import Picamera2
+            w, h = RESOLUTIONS[current_resolution]
+            camera = Picamera2()
+            config = camera.create_video_configuration(
+                main={"size": (w, h), "format": "YUV420"},
+            )
+            camera.configure(config)
+            camera.start()
+            _start_recording()
+            if target_fps != 0:
+                _apply_framerate()
+            camera_available = True
+            latest_frame = None
+            sio.emit('camera_status', {'available': True})
+            logger.info('Camera online %dx%d HW MJPEG', w, h)
+        except Exception as e:
+            camera_available = False
+            logger.error('Camera start failed: %s', e)
 
 
 def _stop_camera():
@@ -156,12 +157,7 @@ def _stop_camera():
 
 
 def init_camera():
-    global camera_available
-    try:
-        _start_camera()
-    except Exception as e:
-        camera_available = False
-        logger.error('Camera unavailable: %s', e)
+    _start_camera()
 
 
 @app.route('/api/camera_status')
@@ -170,28 +166,38 @@ def api_camera_status():
 
 @app.route('/api/set_resolution', methods=['POST'])
 def api_set_resolution():
-    global camera_available, latest_frame, current_resolution
+    global current_resolution
     res_idx = request.json.get('index', 1)
     if not isinstance(res_idx, int) or res_idx < 0 or res_idx >= len(RESOLUTIONS):
         return jsonify({'ok': False, 'error': 'invalid index'}), 400
     if not camera_available:
         return jsonify({'ok': False, 'error': 'camera unavailable'}), 503
     w, h = RESOLUTIONS[res_idx]
-    with camera_lock:
-        camera.stop_recording()
-        camera.stop()
-        time.sleep(0.2)
-        config = camera.create_video_configuration(
-            main={"size": (w, h), "format": "YUV420"},
-        )
-        camera.configure(config)
-        camera.start()
-        _start_recording()
-        _apply_framerate()
-        current_resolution = res_idx
-        latest_frame = None
-        logger.info('Camera reconfigured to %dx%d HW MJPEG', w, h)
+    current_resolution = res_idx
+    th = threading.Thread(target=_reconfigure_camera, args=(w, h), daemon=True)
+    th.start()
+    logger.info('Camera reconfiguring to %dx%d HW MJPEG (async)', w, h)
     return jsonify({'ok': True, 'resolution': (w, h)})
+
+
+def _reconfigure_camera(w, h):
+    global latest_frame
+    with camera_lock:
+        try:
+            camera.stop_recording()
+            camera.stop()
+            time.sleep(0.2)
+            config = camera.create_video_configuration(
+                main={"size": (w, h), "format": "YUV420"},
+            )
+            camera.configure(config)
+            camera.start()
+            _start_recording()
+            _apply_framerate()
+            latest_frame = None
+            logger.info('Camera reconfigured to %dx%d HW MJPEG', w, h)
+        except Exception as e:
+            logger.error('Camera reconfigure failed: %s', e)
 
 @app.route('/api/set_framerate', methods=['POST'])
 def api_set_framerate():
@@ -208,10 +214,12 @@ def api_set_framerate():
             target_fps = val
     if val == 0:
         if camera_available:
-            _stop_camera()
+            th = threading.Thread(target=_stop_camera, daemon=True)
+            th.start()
     else:
         if not camera_available:
-            _start_camera()
+            th = threading.Thread(target=_start_camera, daemon=True)
+            th.start()
         else:
             with camera_lock:
                 _apply_framerate()
