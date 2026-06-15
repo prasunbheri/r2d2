@@ -206,6 +206,7 @@
     background: rgba(26, 26, 46, 0.92);
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 16px; padding: 32px 28px; width: 300px;
+    max-height: 80vh; overflow-y: auto;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
     position: relative;
   }
@@ -219,6 +220,15 @@
     font-size: 1.1rem; background: none; border: none; color: #888;
     cursor: pointer; touch-action: manipulation;
   }
+  .shutdown-btn {
+    display: block; padding: 6px 12px; margin: 12px auto 0;
+    background: #c0392b; color: #fff; border: none; border-radius: 6px;
+    font-size: 0.75rem; font-weight: 600; letter-spacing: 1px;
+    cursor: pointer; touch-action: manipulation;
+  }
+  .shutdown-btn:active { background: #a93226; }
+  .shutdown-btn.holding { background: #e67e22; }
+  .shutdown-btn.holding:active { background: #d35400; }
 
   /* Landscape: video fills left, right column has joystick + controls below */
   @media (orientation: landscape) and (max-height: 500px) {
@@ -318,6 +328,7 @@
         <div class="slider-label"><span>Resolution</span><span id="res-val">640×480</span></div>
         <input type="range" id="res-slider" min="0" max="4" value="1" step="1">
       </div>
+      <button class="shutdown-btn" id="shutdown-btn">Shutdown Pi</button>
     </div>
   </div>
 
@@ -554,6 +565,50 @@ resSlider.addEventListener('input', async () => {
     }
   } catch (_) {}
 });
+
+// Shutdown button – long press 5s then confirm
+const shutdownBtn = document.getElementById('shutdown-btn');
+let shutdownTimer = null;
+let shutdownCountdown = 0;
+let shutdownHolding = false;
+
+function shutdownAbort() {
+  if (!shutdownHolding) return;
+  shutdownHolding = false;
+  clearInterval(shutdownTimer);
+  shutdownBtn.textContent = 'Shutdown Pi';
+  shutdownBtn.classList.remove('holding');
+}
+
+function shutdownStart() {
+  if (shutdownHolding) return;
+  shutdownHolding = true;
+  shutdownCountdown = 5;
+  shutdownBtn.textContent = 'Hold 5…';
+  shutdownBtn.classList.add('holding');
+  shutdownTimer = setInterval(() => {
+    shutdownCountdown--;
+    if (shutdownCountdown <= 0) {
+      clearInterval(shutdownTimer);
+      shutdownBtn.textContent = 'Shutdown Pi';
+      shutdownBtn.classList.remove('holding');
+      shutdownHolding = false;
+      if (confirm('Shut down the Pi?')) {
+        document.getElementById('settings-overlay').classList.remove('open');
+        fetch('/api/shutdown', { method: 'POST' });
+      }
+      return;
+    }
+    shutdownBtn.textContent = 'Hold ' + shutdownCountdown + '…';
+  }, 1000);
+}
+
+shutdownBtn.addEventListener('mousedown', shutdownStart);
+shutdownBtn.addEventListener('touchstart', (e) => { e.preventDefault(); shutdownStart(); }, { passive: false });
+document.addEventListener('mouseup', shutdownAbort);
+document.addEventListener('touchend', shutdownAbort);
+document.addEventListener('mouseleave', shutdownAbort);
+document.addEventListener('touchcancel', shutdownAbort);
 
 // FPS counter via camera_status polling
 const fpsEl = document.getElementById('cam-fps');

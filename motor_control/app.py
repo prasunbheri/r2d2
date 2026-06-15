@@ -1,14 +1,31 @@
 import io
+import logging
 import os
 import socket
 import sys
 import threading
 import time
+import traceback
 
 from flask import Flask, jsonify, render_template, Response, request, stream_with_context
 from flask_socketio import SocketIO
 
 from motor_control import MotorController, MOTOR_NAMES
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S',
+    stream=sys.stdout,
+)
+logger = logging.getLogger('r2')
+
+def log_unhandled(exc_type, exc_value, exc_tb):
+    logger.error('Unhandled exception', exc_info=(exc_type, exc_value, exc_tb))
+sys.excepthook = log_unhandled
+threading.excepthook = lambda args: logger.error(
+    'Thread exception', exc_info=(args.exc_type, args.exc_value, args.exc_traceback)
+)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(24).hex()
@@ -52,10 +69,10 @@ def init_camera():
         camera.configure(config)
         camera.start()
         camera_available = True
-        print(f'Camera: online ({w}x{h} MJPEG)')
+        logger.info('Camera online %dx%d MJPEG', w, h)
     except Exception as e:
         camera_available = False
-        print(f'Camera: unavailable ({e})')
+        logger.error('Camera unavailable: %s', e)
 
 
 def camera_capture_loop():
@@ -102,8 +119,34 @@ def api_set_resolution():
         camera.start()
         current_resolution = res_idx
         latest_frame = None
-        print(f'Camera: reconfigured to {w}x{h}')
+        logger.info('Camera reconfigured to %dx%d', w, h)
     return jsonify({'ok': True, 'resolution': (w, h)})
+
+@app.route('/api/shutdown', methods=['POST'])
+def api_shutdown():
+    th = threading.Thread(target=lambda: os.system('echo r2tele | sudo -S shutdown -h now'), daemon=True)
+    th.start()
+    return jsonify({'ok': True})
+
+@app.route('/api/debug')
+def api_debug():
+    import os
+    return jsonify({
+        'root_path': app.root_path,
+        'template_folder': app.template_folder,
+        'thread_count': threading.active_count(),
+        'camera_available': camera_available,
+        'camera_fps': camera_fps,
+        'camera_resolution': RESOLUTIONS[current_resolution],
+        'file_size': os.path.getsize(os.path.join(app.root_path, 'templates', 'index.html')),
+    })
+
+
+def heartbeat_log():
+    while True:
+        time.sleep(60)
+        logger.info('heartbeat threads=%d cam=%s fps=%.1f',
+                     threading.active_count(), camera_available, camera_fps)
 
 @app.route('/')
 def index():
@@ -165,9 +208,9 @@ def init_camera_async():
         if camera_available:
             th = threading.Thread(target=camera_capture_loop, daemon=True)
             th.start()
-            print('Camera capture loop started')
+            logger.info('Camera capture loop started')
     except Exception as e:
-        print(f'Camera init thread error: {e}')
+        logger.error('Camera init thread error: %s', e)
 
 
 def main():
@@ -175,18 +218,24 @@ def main():
     try:
         controller = MotorController()
     except ConnectionError as e:
-        print(f'FATAL: {e}', file=sys.stderr)
+        logger.error('FATAL: %s', e)
         sys.exit(1)
 
     cam_thread = threading.Thread(target=init_camera_async, daemon=True)
     cam_thread.start()
 
+    hb = threading.Thread(target=heartbeat_log, daemon=True)
+    hb.start()
+
     ip = get_ip()
     port = 5000
-    print(f'Motor controller ready at http://{ip}:{port}')
-    print(f'Hostname: {socket.gethostname()}.local:{port}')
-    print(f'Motors: {", ".join(MOTOR_NAMES)}')
-    print('Camera initializing in background...')
+    logger.info('=' * 40)
+    logger.info('R2 Motor Controller v2 starting')
+    logger.info('http://%s:%d', ip, port)
+    logger.info('Hostname: %s.local:%d', socket.gethostname(), port)
+    logger.info('Motors: %s', ', '.join(MOTOR_NAMES))
+    logger.info('Camera initializing in background...')
+    logger.info('=' * 40)
     sio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
 
 
