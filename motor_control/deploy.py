@@ -69,7 +69,7 @@ try:
     print('\n'.join(lines[-5:]))
 
     print('Installing Python packages...')
-    out = ssh('pip3 install flask flask-socketio', timeout=60)
+    out = ssh('pip3 install flask flask-socketio waitress', timeout=60)
     print('\n'.join(out.split('\n')[-3:]))
 
     print('Enabling pigpiod...')

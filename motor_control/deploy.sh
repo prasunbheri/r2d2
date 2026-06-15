@@ -21,7 +21,7 @@ scp tests/__init__.py tests/mock_pigpio.py tests/test_motor_control.py tests/tes
 # Install system dependencies
 ssh "$PI_HOST" "sudo apt update && sudo apt install -y pigpio python3-pip"
 ssh "$PI_HOST" "sudo systemctl enable pigpiod && sudo systemctl start pigpiod"
-ssh "$PI_HOST" "pip3 install flask flask-socketio"
+ssh "$PI_HOST" "pip3 install flask flask-socketio waitress"
 
 # Install systemd services
 ssh "$PI_HOST" "sudo cp $PI_DIR/motor_control.service /etc/systemd/system/"

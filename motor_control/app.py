@@ -9,6 +9,7 @@ import traceback
 
 from flask import Flask, jsonify, render_template, Response, request, stream_with_context
 from flask_socketio import SocketIO
+from waitress import serve
 
 from motor_control import MotorController, MOTOR_NAMES
 
@@ -236,7 +237,7 @@ def main():
     logger.info('Motors: %s', ', '.join(MOTOR_NAMES))
     logger.info('Camera initializing in background...')
     logger.info('=' * 40)
-    sio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
+    serve(sio, host='0.0.0.0', port=port, threads=8)
 
 
 if __name__ == '__main__':
