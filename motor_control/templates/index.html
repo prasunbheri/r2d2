@@ -222,13 +222,13 @@
   }
   .menu-corner-btn {
     position: absolute; background: none; border: none; cursor: pointer;
-    font-size: 1.3rem; touch-action: manipulation; color: #666;
-    padding: 8px; line-height: 1; transition: color 0.15s;
+    touch-action: manipulation; color: #666; padding: 6px; line-height: 1;
   }
+  .menu-corner-btn svg { display: block; width: 20px; height: 20px; }
   .menu-corner-btn:active { color: #e94560; }
   .menu-corner-btn.holding { color: #e67e22; }
-  .menu-bottom-left { bottom: 6px; left: 6px; }
-  .menu-bottom-right { bottom: 6px; right: 6px; }
+  .menu-bottom-left { bottom: 4px; left: 4px; }
+  .menu-bottom-right { bottom: 4px; right: 4px; }
 
   .stats-overlay {
     position: fixed; inset: 0; z-index: 200;
@@ -370,8 +370,11 @@
         <div class="slider-label"><span>Frame Rate</span><span id="fps-val">12 FPS</span></div>
         <input type="range" id="fps-slider" min="0" max="60" value="12" step="1">
       </div>
-      <button class="menu-corner-btn menu-bottom-left" id="shutdown-btn">⏻</button>
-      <button class="menu-corner-btn menu-bottom-right" id="stats-btn">ℹ</button>
+      <button class="menu-corner-btn menu-bottom-left" id="shutdown-btn">
+        <span id="shutdown-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg></span>
+        <span id="shutdown-count" style="display:none;font-size:15px;font-weight:700"></span>
+      </button>
+      <button class="menu-corner-btn menu-bottom-right" id="stats-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>
     </div>
   </div>
 
@@ -599,11 +602,13 @@ document.addEventListener('touchend', (e) => {
 // Speed slider (controls return-to-center damping)
 speedSlider.addEventListener('input', () => {
   speedVal.textContent = speedSlider.value + '%';
+  fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({joystick_speed: parseInt(speedSlider.value)}) }).catch(()=>{});
 });
 
 // Speed Limiter slider (scales motor output)
 limiterSlider.addEventListener('input', () => {
   limiterVal.textContent = limiterSlider.value + '%';
+  fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({max_speed_limiter: parseInt(limiterSlider.value)}) }).catch(()=>{});
   if (active) {
     const speeds = computeMotorSpeeds(joyX, joyY);
     sendSpeeds(speeds);
@@ -643,6 +648,8 @@ fpsSlider.addEventListener('input', async () => {
 
 // Shutdown button – 5s long-press, icon countdown
 const shutdownBtn = document.getElementById('shutdown-btn');
+const shutdownIcon = document.getElementById('shutdown-icon');
+const shutdownCount = document.getElementById('shutdown-count');
 let shutdownTimer = null;
 let shutdownCountdown = 0;
 let shutdownHolding = false;
@@ -651,7 +658,8 @@ function shutdownAbort() {
   if (!shutdownHolding) return;
   shutdownHolding = false;
   clearInterval(shutdownTimer);
-  shutdownBtn.innerHTML = '⏻';
+  shutdownIcon.style.display = '';
+  shutdownCount.style.display = 'none';
   shutdownBtn.classList.remove('holding');
 }
 
@@ -659,13 +667,16 @@ function shutdownStart() {
   if (shutdownHolding) return;
   shutdownHolding = true;
   shutdownCountdown = 5;
-  shutdownBtn.textContent = '5';
+  shutdownIcon.style.display = 'none';
+  shutdownCount.style.display = '';
+  shutdownCount.textContent = '5';
   shutdownBtn.classList.add('holding');
   shutdownTimer = setInterval(() => {
     shutdownCountdown--;
     if (shutdownCountdown <= 0) {
       clearInterval(shutdownTimer);
-      shutdownBtn.innerHTML = '⏻';
+      shutdownIcon.style.display = '';
+      shutdownCount.style.display = 'none';
       shutdownBtn.classList.remove('holding');
       shutdownHolding = false;
       if (confirm('Shut down the Pi?')) {
@@ -674,7 +685,7 @@ function shutdownStart() {
       }
       return;
     }
-    shutdownBtn.textContent = shutdownCountdown;
+    shutdownCount.textContent = shutdownCountdown;
   }, 1000);
 }
 
@@ -765,6 +776,14 @@ const reconnectSub = document.getElementById('reconnect-sub');
 let countdownTimer = null;
 let countdown = 3;
 let countdownPause = false;
+
+// Load saved slider positions from server
+fetch('/api/settings').then(r => r.json()).then(d => {
+  if (d.joystick_speed != null) { speedSlider.value = d.joystick_speed; speedVal.textContent = d.joystick_speed + '%'; }
+  if (d.max_speed_limiter != null) { limiterSlider.value = d.max_speed_limiter; limiterVal.textContent = d.max_speed_limiter + '%'; }
+  if (d.resolution_index != null) { resSlider.value = d.resolution_index; resVal.textContent = RES_LABELS[d.resolution_index]; }
+  if (d.fps != null && d.fps >= 0) { fpsSlider.value = d.fps; fpsVal.textContent = fpsLabel(d.fps); }
+}).catch(()=>{});
 
 const socket = io({
   reconnectionDelay: 5000,

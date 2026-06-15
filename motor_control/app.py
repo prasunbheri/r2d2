@@ -44,6 +44,8 @@ _last_frame_time = 0.0
 RESOLUTIONS = [(320, 240), (640, 480), (800, 600), (1024, 768), (1280, 960)]
 current_resolution = 1  # index into RESOLUTIONS
 target_fps = 12  # desired framerate; None = uncapped
+joystick_speed = 70  # 0-100
+max_speed_limiter = 50  # 0-100
 _fps_controls = None  # (min_dur, max_dur) last applied via set_controls
 _fps_lock = threading.Lock()
 
@@ -109,6 +111,8 @@ def _apply_framerate():
 def _start_camera():
     global camera, camera_available, latest_frame
     with camera_lock:
+        if camera_available:
+            return
         try:
             from picamera2 import Picamera2
             w, h = RESOLUTIONS[current_resolution]
@@ -226,6 +230,23 @@ def api_set_framerate():
     label = 'off' if val == 0 else (str(target_fps) if target_fps else 'uncapped')
     logger.info('Framerate set to %s', label)
     return jsonify({'ok': True, 'fps': label})
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+def api_settings():
+    global joystick_speed, max_speed_limiter
+    if request.method == 'POST':
+        data = request.json or {}
+        if 'joystick_speed' in data:
+            joystick_speed = max(0, min(100, int(data['joystick_speed'])))
+        if 'max_speed_limiter' in data:
+            max_speed_limiter = max(0, min(100, int(data['max_speed_limiter'])))
+        return jsonify({'ok': True})
+    return jsonify({
+        'joystick_speed': joystick_speed,
+        'max_speed_limiter': max_speed_limiter,
+        'resolution_index': current_resolution,
+        'fps': 60 if target_fps is None else target_fps,
+    })
 
 @app.route('/api/shutdown', methods=['POST'])
 def api_shutdown():
