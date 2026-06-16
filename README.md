@@ -1,6 +1,6 @@
 # R2 Motor Controller
 
-A web-controlled 4-motor differential drive system for a Raspberry Pi Zero W, featuring a virtual joystick dashboard, real-time camera feed, status LED watchdog, and silent 20 kHz PWM motor control.
+A web-controlled 4-motor differential drive system for a Raspberry Pi Zero W, featuring a virtual joystick dashboard, HW MJPEG camera feed, status LED watchdog, and silent 20 kHz PWM motor control with slew rate limiting and auto-stop watchdog.
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -9,7 +9,7 @@ A web-controlled 4-motor differential drive system for a Raspberry Pi Zero W, fe
 │  │ [CAMERA] │    ┌─────┐                     │
 │  │  stream  │    │  ▲  │   ┌──────────┐      │
 │  │  640x480 │ ◄──│ ●  │──►│ FL: +45  │      │
-│  │  fps: 29 │    │  ▼  │   │ FR: +30  │      │
+│  │  fps: 9  │    │  ▼  │   │ FR: +30  │      │
 │  └──────────┘    └─────┘   │ RL: +45  │      │
 │       ┌────┐ ┌──────┐      │ RR: +30  │      │
 │       │ ⚙  │ │AUTO  │STOP  └──────────┘      │
@@ -132,15 +132,15 @@ A web-controlled 4-motor differential drive system for a Raspberry Pi Zero W, fe
 ```
 
 | Layer | Technology | Purpose |
-|---|---|---|
+|---|---|---|---|
 | **GPIO/PWM** | `pigpio` (pigpiod daemon) | Hardware-timed DMA PWM on any GPIO, 20 kHz, no jitter, silent operation |
-| **Motor Control** | `motor_control.py` | 4-motor abstraction with speed clamping, direction control via DIR+PWM pins |
-| **Web Server** | `app.py` (Flask + Flask-SocketIO) | HTTP + WebSocket server, camera streaming, REST API |
-| **Dashboard** | `templates/index.html` | Mobile-first dark-theme SPA with virtual joystick, FPS counter, settings, reconnection overlay |
-| **Watchdog** | `watchdog.py` | Independent service monitor using sysfs GPIO (no pigpio dependency), auto-restarts failed services |
-| **Camera** | `picamera2` + MJPEG | Continuous JPEG capture loop, served as multipart MJPEG stream |
+| **Motor Control** | `motor_control.py` | 4-motor abstraction with threading lock, target/current speed, 50Hz slew (7%/tick), 2s watchdog, pigpiod reconnect |
+| **Web Server** | `app.py` (Flask + Flask-SocketIO + Waitress) | HTTP server (waitress threads=6), polling-only SocketIO, HW MJPEG camera stream, REST API |
+| **Dashboard** | `templates/index.html` | Mobile-first dark-theme SPA with virtual joystick, FPS counter, settings, stats overlay, reconnection overlay |
+| **Watchdog** | `watchdog.py` | Independent sysfs GPIO monitor (no pigpio), auto-restarts failed services, structured logging |
+| **Camera** | `picamera2` + HW MJPEG (`/dev/video11`) | GPU-encoded MJPEG via `start_recording(MJPEGEncoder)`, YUV420 output, minimal CPU cost |
 | **Process Management** | systemd units | `pigpiod.service`, `motor_control.service`, `watchdog.service` with dependency chain and auto-restart |
-| **Deployment** | `deploy.py` (pexpect), `deploy.sh` (bash) | One-command SSH deploy to Pi |
+| **Deployment** | `deploy.py` (pexpect), `deploy.sh` (bash) | One-command SSH deploy to Pi, now includes `static/` directory |
 
 ---
 
@@ -203,7 +203,7 @@ sudo apt install -y pigpio python3-pip python3-picamera2 libcamera-v4l2
 **Python packages:**
 
 ```bash
-pip3 install flask flask-socketio pytest --break-system-packages
+pip3 install flask flask-socketio waitress pytest --break-system-packages
 ```
 
 **Enable and start pigpiod:**
@@ -263,7 +263,7 @@ chmod +x deploy.sh
 
 ### 1. Motor Controller (`motor_control.py`)
 
-Core abstraction over `pigpio` for controlling 4 brushed DC motors via H-bridge drivers.
+Core abstraction over `pigpio` for controlling 4 brushed DC motors via H-bridge drivers. Uses **target/current speed split** with a **slew daemon** and internal lock.
 
 ```
 MotorController
@@ -273,29 +273,51 @@ MotorController
 │   ├── Configure all 8 GPIOs as outputs
 │   ├── Set PWM frequency to 20 kHz
 │   ├── Set PWM range to 1000
-│   └── Initialize all speeds to 0
+│   ├── Initialize _target_speed and _current_speed to 0
+│   ├── Create threading.Lock for all pigpio writes
+│   └── Start 50Hz slew daemon thread
 │
 ├── set_speed(motor, speed)
 │   ├── Validate motor name
 │   ├── Clamp speed to [-100, 100]
-│   ├── Set DIR pin: 1 for forward, 0 for reverse
-│   ├── Compute duty: |speed|/100 * 1000
-│   └── Write PWM dutycycle
+│   └── Write _target_speed[motor] (slew thread ramps gradually)
 │
 ├── set_speeds(speeds_dict)
-│   └── Bulk set multiple motors
+│   └── Bulk set multiple motors (all target-speed writes)
 │
 ├── set_all(speed)
-│   └── Set all 4 motors to same speed
+│   └── Set all 4 motors to same target speed
 │
 ├── stop_all()
-│   └── Set all motors to 0
+│   └── Set all targets to 0 + reset watchdog timer
 │
 ├── get_speed(motor) / get_all_speeds()
-│   └── Read back internal speed state
+│   └── Return _target_speed (commanded speed, not current)
+│
+├── _slew_loop()  (daemon thread, 50Hz)
+│   ├── For each motor:
+│   │   ├── If direction changed: brake to 0 instantly
+│   │   ├── Else: ramp _current_speed toward _target at 7%/tick
+│   │   └── Write DIR + PWM only when _current_speed changes
+│   ├── 2s watchdog: zero all targets if no set_speed call
+│   └── sleep(0.02) between iterations
+│
+├── _write_motor(motor, speed, dir)
+│   ├── Acquire threading.Lock
+│   ├── Write DIR pin (1=forward, 0=reverse)
+│   ├── Compute duty: |speed|/100 * 1000
+│   ├── Write PWM dutycycle
+│   └── On pigpio error → _reconnect_pigpio (3 retries × 0.5s)
+│
+├── _reconnect_pigpio()
+│   ├── Stop + close old pi connection
+│   ├── Connect to new pi() — up to 3 attempts
+│   ├── Re-initialize all 8 GPIO pins
+│   └── On total failure: zero all motors via _write_motor(fallback=0)
 │
 └── cleanup()
-    └── Stop all + disconnect pigpio
+    ├── Set all targets to 0, wait for slew
+    └── Stop + disconnect pigpio
 ```
 
 **PWM Configuration:**
@@ -333,50 +355,99 @@ This gives tank-like differential steering:
 
 ### 2. Web Server (`app.py`)
 
-Flask + Flask-SocketIO application that serves the dashboard, handles WebSocket joystick commands, streams camera video, and provides REST APIs.
+Flask + Flask-SocketIO application served via **Waitress** (threads=6), with polling-only SocketIO (no WebSocket upgrade under waitress). Serves dashboard, HW MJPEG camera stream, REST APIs, and handles joystick commands.
 
 **Startup Sequence:**
 
 ```
 main()
-├── Create MotorController
+├── Create MotorController (pigpio connection)
 ├── Initialize camera in background thread
 │   └── init_camera_async()
-│       ├── init_camera()
-│       │   ├── Create Picamera2 instance
-│       │   ├── Configure video mode (default 640×480)
-│       │   ├── Set frame duration limits (~30 FPS max)
-│       │   └── Start camera
-│       └── Start camera_capture_loop()
-│           ├── Continuously capture JPEG to io.BytesIO
-│           └── Update latest_frame + fps counter
-├── Start heartbeat logger thread (every 60s)
+│       ├── Acquire camera_lock
+│       ├── Create Picamera2 instance
+│       ├── Configure video config (YUV420, default 640×480)
+│       ├── Create MJPEGEncoder → CircularOutput
+│       ├── camera.start_recording(encoder, output)
+│       └── Set frame duration limits (default 9 FPS)
+├── Start heartbeat thread (every 60s)
+│   ├── Log motor speeds + stale warning
+│   ├── Retry camera init if failed (target_fps != 0)
+│   └── Log thread count
 ├── Log startup banner
-└── Run SocketIO server on 0.0.0.0:5000
+└── waitress.serve(app, host='0.0.0.0', port=5000, threads=6)
 ```
+
+**SocketIO Transport:**
+
+- Forced to `transports=['polling']` on both server and client
+- WebSocket upgrade fails with `RuntimeError` under waitress
+- Reconnection uses exponential backoff: 250ms initial, ×1.5 per attempt, 3s cap, 0.3 randomization
 
 **Thread Safety:**
 
-- `_update_lock` — threading.Lock for motor speed updates (prevents race conditions when multiple WebSocket messages arrive simultaneously)
-- `camera_lock` — threading.Lock for camera reconfiguration (`stop`/`configure`/`start` sequence must be atomic)
-- All background threads are daemon threads (die with the main process)
+- `MotorController._lock` — internal threading.Lock wraps all pigpio writes (motor speed updates, slew thread, watchdog)
+- `camera_lock` — threading.Lock for camera lifecycle (`start_recording` / `stop_recording` / reconfiguration must be atomic)
+- All background threads are daemon (die with main process)
 
-**Camera Reconfiguration:**
+**Camera (HW MJPEG):**
 
-Resolution changes reuse the existing `Picamera2` instance to avoid "Camera in Acquired state" errors:
+Uses VideoCore GPU encoder via `/dev/video11` (`bcm2835-codec-decode`):
+
+- `Picamera2` outputs **YUV420** (NV12 not in picamera2 V4L2 lookup table)
+- `MJPEGEncoder` → `CircularOutput` produces HW-encoded JPEG frames
+- `outputframe` in `CircularOutput` receives raw bytes (no copy needed)
+- Adaptive sleep: `1.0/target_fps * 0.8` (minimum 10ms)
+- Format change cleared by `stop_recording()` → `stop()` → `close()` → full re-init
+
+**Camera Reconfiguration (Resolution):**
+
+Resolution changes require full pipeline restart:
 
 ```python
 with camera_lock:
-    camera.stop()         # Release the camera resource
-    time.sleep(0.2)       # Settle time
-    config = camera.create_video_configuration(main={"size": (w, h)})
-    camera.configure(config)  # Re-apply with new resolution
-    camera.start()         # Resume streaming
+    camera.stop_recording()
+    camera.stop()
+    camera.close()
+    camera = Picamera2()
+    config = camera.create_video_configuration(main={"size": (w, h), "format": "YUV420"})
+    camera.configure(config)
+    encoder = MJPEGEncoder()
+    output = CircularOutput()
+    camera.start_recording(encoder, output)
 ```
+
+**Camera Auto-Retry:**
+
+- Heartbeat checks `not camera_available and target_fps != 0` every 60s
+- Spawns `init_camera_async()` in daemon thread
+- `_start_camera()` guarded by `camera_lock`, returns early if already available
+
+**Camera Leak Protection:**
+
+- Exception in `_start_camera()` calls `stop_recording()` → `stop()` → `close()` → sets `camera = None`
+- Prevents Picamera2 memory leak on init failure
+
+**Frame Rate Control:**
+
+- Slider: 0 = camera off, 1–59 = value FPS, 60 = Uncapped
+- Dynamic via `camera.set_controls({"FrameDurationLimits": (int(1e6/fps), int(1e6/fps))})` while recording
+- FPS slider=0 calls `_stop_camera()` (stop recording + close)
+
+**Settings Persistence:**
+
+- `GET /api/settings` returns `{"joystick_speed", "max_speed_limiter", "resolution_index", "fps"}`
+- `POST /api/settings` saves `joystick_speed` and `max_speed_limiter`
+- Page loads saved values on connect and applies to UI sliders
+
+**Shutdown:**
+
+- `POST /api/shutdown` calls `controller.stop_all()` (ramps motors to 0)
+- Then `echo r2tele | sudo -S shutdown -h now` in daemon thread
 
 ### 3. Watchdog (`watchdog.py`)
 
-Independent service monitor that runs as root (needed for sysfs GPIO access). It does **not** depend on `pigpio` — it uses the Linux sysfs GPIO interface directly.
+Independent service monitor that runs as root (needed for sysfs GPIO access). It does **not** depend on `pigpio` — it uses the Linux sysfs GPIO interface directly. Uses Python `logging` for restart/recover/fatal events.
 
 ```
 watchdog.py
@@ -394,10 +465,12 @@ watchdog.py
 │   └── Main loop (every 2s):
 │       ├── Check each REQUIRED_SERVICE with systemctl is-active
 │       ├── If any inactive:
+│       │   ├── logger.info("Restart attempt %d/%d for %s", ...)
 │       │   ├── Blink LED fast (0.2s on / 0.2s off)
 │       │   ├── systemctl restart <service>
 │       │   ├── Increment retry counter
 │       │   ├── If retries > MAX_RETRIES (3):
+│       │   │   ├── logger.error("Max retries exceeded for %s", ...)
 │       │   │   └── Fatal pattern (3 × 300ms pulses, 2s gap)
 │       │   └── Wait RECHECK_DELAY (5s), check again
 │       └── If all ok → LED solid on
@@ -409,6 +482,7 @@ watchdog.py
 - **Runs as root** — sysfs GPIO requires root; watchdog.service sets `User=root`
 - **Independent systemd unit** — `Requires=pigpiod.service` (not `BindsTo=`), so `systemctl stop motor_control` doesn't cascade-kill the watchdog
 - **Max 3 retries** — after 3 consecutive failures per service, shows fatal pattern and continues (doesn't exit — tries forever at 3-retry blocks)
+- **Structured logging** — `logging.getLogger('watchdog')` logs to stderr → systemd journal
 
 ### 4. Web Dashboard (`templates/index.html`)
 
@@ -424,9 +498,10 @@ Single-page application with dark theme, mobile-first responsive design, and off
 | **Auto-Center Toggle** | CSS switch: when on, joystick snaps to zero on release; when off, holds last position |
 | **STOP Button** | Emergency stop — sets all motors to 0 immediately |
 | **Motor Speed Display** | 4-panel grid showing FL/FR/RL/RR speeds (green for forward, red for reverse) |
-| **Settings Overlay** | Gear button top-left opens modal with sliders for Joystick Speed, Max Speed Limiter, Resolution |
-| **Shutdown Button** | Red button in settings — 5-second long-press with countdown + confirm dialog |
-| **Reconnection Overlay** | Full-screen dimmed overlay with countdown timer when WebSocket disconnects |
+| **Settings Overlay** | Gear button top-left opens modal with sliders for Joystick Speed (`step=5`, `min=10`), Speed Limiter (`step=5`), Resolution, Frame Rate |
+| **Shutdown Button** | ⏻ icon bottom-left — 5-second long-press with countdown, then stops motors + `sudo shutdown -h now` |
+| **Stats Button** | ℹ icon bottom-right — opens overlay polling `/api/stats` every 5s |
+| **Reconnection Overlay** | Full-screen dimmed overlay with CSS animated dots when connection lost |
 | **Landscape Layout** | CSS media query rearranges to video-left / joystick-right layout on phones in landscape |
 
 **JavaScript Architecture:**
@@ -434,7 +509,7 @@ Single-page application with dark theme, mobile-first responsive design, and off
 ```
 index.html JS
 │
-├── SocketIO Client (v4.7.5, served from /static/socket.io.min.js)
+├── SocketIO Client (v4.7.5, served from /static/socket.io.min.js, polling transport)
 │   ├── connect → emit 'connect', receive status + camera_status
 │   ├── set_speed → send motor speed update
 │   ├── set_speeds → send bulk speed update (throttled 50ms)
@@ -447,20 +522,30 @@ index.html JS
 │   ├── computeMotorSpeeds(x, y) → differential steering
 │   ├── Chase animation with requestAnimationFrame
 │   ├── Auto-center return when toggle is on
-│   └── Speed scaling via Max Speed Limiter slider
+│   └── Speed scaling via Speed Limiter slider
 │
-├── Camera Polling
-│   ├── Poll /api/camera_status every 1s for FPS
-│   └── Poll /api/camera_status every 3s until camera available
+├── Settings Persistence
+│   ├── On connect: GET /api/settings, apply saved values
+│   ├── On slider change: POST /api/settings to save
+│   └── Applies joystick_speed + max_speed_limiter
+│
+├── Frame Rate Control
+│   ├── Slider 0–60 → POST /api/set_framerate
+│   ├── 0 = camera off, 1–59 = value FPS, 60 = Uncapped
+│   └── FPS counter polls /api/camera_status every 2s
 │
 ├── Resolution Control
-│   ├── Slider 0–4 → POST /api/set_resolution
+│   ├── Slider 0–4 → POST /api/set_resolution (async)
 │   └── Cache-busting via Date.now() query param
+│
+├── Stats Overlay
+│   ├── ℹ button opens overlay polling /api/stats every 5s
+│   └── Shows memory, load, net TX/RX, uptime, temperature
 │
 └── Shutdown Logic
     ├── mousedown/mousedown → start 5s countdown
     ├── Visual feedback (orange .holding) + countdown text
-    └── Release aborts → confirm() → POST /api/shutdown
+    └── Release aborts → POST /api/shutdown (stops motors + poweroff)
 ```
 
 **Chase Animation:**
@@ -489,12 +574,16 @@ Each animation frame moves the knob `per_frame_speed` pixels toward the target, 
 ### HTTP Endpoints
 
 | Endpoint | Method | Description | Request | Response |
-|---|---|---|---|---|
+|---|---|---|---|---|---|
 | `/` | GET | Serve dashboard HTML | — | `text/html` |
 | `/video_feed` | GET | MJPEG camera stream | — | `multipart/x-mixed-replace` |
 | `/api/camera_status` | GET | Camera availability + FPS | — | `{"available": bool, "fps": float}` |
+| `/api/settings` | GET | Load saved settings | — | `{"joystick_speed": int, "max_speed_limiter": int, "resolution_index": int, "fps": int}` |
+| `/api/settings` | POST | Save joystick_speed + max_speed_limiter | `{"joystick_speed": 70, "max_speed_limiter": 50}` | `{"ok": true}` |
 | `/api/set_resolution` | POST | Change camera resolution | `{"index": 0-4}` | `{"ok": true, "resolution": [w, h]}` |
-| `/api/shutdown` | POST | Shutdown the Pi | — | `{"ok": true}` |
+| `/api/set_framerate` | POST | Change camera framerate (0=off) | `{"fps": 9}` | `{"ok": true, "fps": 9}` |
+| `/api/shutdown` | POST | Stop motors + shutdown the Pi | — | `{"ok": true}` |
+| `/api/stats` | GET | System stats (memory/load/net/uptime/temp) | — | `{"mem": {...}, "load": [...], "net": {...}, "uptime": float, "temp": float}` |
 | `/api/debug` | GET | Debug information | — | `{"thread_count": int, "camera_available": bool, ...}` |
 
 **Resolution Index Mapping:**
@@ -543,13 +632,13 @@ The watchdog drives a standard LED on **GPIO 5** (via sysfs, not pigpio).
 
 ## Testing
 
-The project includes **50 unit tests** with full hardware mocking — no Pi required.
+The project includes **51 unit tests** with full hardware mocking — no Pi required.
 
 ```
 tests/
 ├── __init__.py
 ├── mock_pigpio.py          # Complete pigpio mock
-├── test_motor_control.py   # 28 tests — MotorController
+├── test_motor_control.py   # 29 tests — MotorController
 ├── test_app.py             # 12 tests — Flask + SocketIO
 └── test_watchdog.py        # 10 tests — Watchdog
 ```
@@ -582,7 +671,7 @@ from motor_control import MotorController, clamp_speed, validate_motor
 
 | Module | Coverage Highlights |
 |---|---|
-| `motor_control` | Init, set_speed (fwd/rev/zero/bounds), set_speeds, set_all, stop_all, get_speed, cleanup, error handling |
+| `motor_control` | Init, set_speed (fwd/rev/zero/bounds), set_speeds, set_all, stop_all, get_speed, cleanup, error handling, lock/slew/watchdog |
 | `app` | HTTP routes, SocketIO events, connection, status emission, stop handling |
 | `watchdog` | LED patterns, service_active, restart_service, wait_for_services, fatal handling |
 
@@ -654,10 +743,11 @@ sudo systemctl enable pigpiod    # Enable at boot
 ```bash
 libcamera-hello                   # Test camera hardware
 v4l2-ctl --list-devices           # Check V4L2 devices
+v4l2-ctl -d /dev/video11 --all    # Verify MJPEG encoder
 sudo systemctl restart motor_control.service  # Restart to re-init
 ```
 
-The camera initializes in a background thread, so it may take 5–15 seconds after the web server starts. The dashboard polls `/api/camera_status` every 3s until the camera is available.
+The camera initializes in a background thread, so it may take 5–15 seconds after the web server starts. The dashboard polls `/api/camera_status` every 3s until the camera is available. Set FPS slider to 0 then back to a value to force re-init from the UI.
 
 ### Motor not responding
 
@@ -693,7 +783,7 @@ function sendSpeeds(speeds) {
 
 ### Shutdown not working
 
-The shutdown endpoint runs `sudo shutdown -h now` with password piped via `echo r2tele | sudo -S`. If the password has changed, update `app.py`:
+The shutdown endpoint calls `controller.stop_all()` then runs `sudo shutdown -h now` with password piped via `echo r2tele | sudo -S`. If the password has changed, update `app.py`:
 
 ```python
 os.system('echo YOUR_PASSWORD | sudo -S shutdown -h now')
@@ -797,7 +887,7 @@ r2d2/
 │   ├── deploy.sh                  # Bash deployment script (scp + ssh)
 │   │
 │   ├── templates/
-│   │   └── index.html             # Dashboard SPA (739 lines)
+│   │   └── index.html             # Dashboard SPA (856 lines)
 │   │
 │   ├── static/
 │   │   └── socket.io.min.js       # SocketIO client v4.7.5 (served locally)
@@ -805,7 +895,7 @@ r2d2/
 │   └── tests/
 │       ├── __init__.py            # Package marker
 │       ├── mock_pigpio.py         # Complete pigpio mock for testing
-│       ├── test_motor_control.py  # 28 tests
+│       ├── test_motor_control.py  # 29 tests
 │       ├── test_app.py            # 12 tests
 │       └── test_watchdog.py       # 10 tests
 │
@@ -820,4 +910,4 @@ MIT License — see LICENSE file if present, or use freely.
 
 ---
 
-*R2 Motor Controller v2 — Built for Raspberry Pi Zero W with Cytron MDD20A drivers and MY6812 motors.*
+*R2 Motor Controller v2.1 — Built for Raspberry Pi Zero W with Cytron MDD20A drivers and MY6812 motors.*
