@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Deploy R2 Motor Control stack to Pi via SSH with password."""
 import pexpect
+import shlex
 import sys
 import os
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else 'r2tele@192.168.0.160'
-SSH_PASS = 'r2tele'
-SUDO_PASS = 'r2tele'
+HOST = sys.argv[1] if len(sys.argv) > 1 else 'r2tele@r2tele.local'
 LOCAL_DIR = os.path.dirname(os.path.abspath(__file__))
 REMOTE_DIR = '/home/r2tele/motor_control'
 
 FILES = [
     'motor_control.py', 'app.py', 'watchdog.py',
     'motor_control.service', 'watchdog.service',
+    'requirements.txt', 'motor_control.sudoers',
     'deploy.sh',
     ('templates/index.html', 'templates/'),
     ('tests/__init__.py', 'tests/'),
@@ -26,8 +26,11 @@ FILES = [
 SSH_OPTS = '-o StrictHostKeyChecking=no -o PreferredAuthentications=password'
 
 
+SSH_PASS = os.environ.get('R2_SSH_PASS', 'r2tele')
+
+
 def ssh(cmd, timeout=30):
-    child = pexpect.spawn(f'ssh {SSH_OPTS} {HOST} bash -c {repr(cmd)}')
+    child = pexpect.spawn(f'ssh {SSH_OPTS} {HOST} bash -c {shlex.quote(cmd)}')
     child.expect('password:', timeout=10)
     child.sendline(SSH_PASS)
     child.expect(pexpect.EOF, timeout=timeout)
@@ -35,8 +38,7 @@ def ssh(cmd, timeout=30):
 
 
 def sudo(cmd, timeout=30):
-    full_cmd = f'echo {SUDO_PASS} | sudo -S sh -c {repr(cmd)}'
-    return ssh(full_cmd, timeout)
+    return ssh(f'sudo sh -c {shlex.quote(cmd)}', timeout)
 
 
 def scp_upload(local, remote):
@@ -70,11 +72,14 @@ try:
     print('\n'.join(lines[-5:]))
 
     print('Installing Python packages...')
-    out = ssh('pip3 install flask flask-socketio waitress', timeout=60)
+    out = ssh(f'cd {REMOTE_DIR} && pip3 install --break-system-packages -r requirements.txt', timeout=120)
     print('\n'.join(out.split('\n')[-3:]))
 
     print('Enabling pigpiod...')
     sudo('systemctl enable pigpiod && systemctl start pigpiod')
+
+    print('Installing sudoers rule...')
+    sudo(f'cp {REMOTE_DIR}/motor_control.sudoers /etc/sudoers.d/motor_control && chmod 440 /etc/sudoers.d/motor_control')
 
     print('Installing systemd services...')
     cmds = (
@@ -91,7 +96,7 @@ try:
 
     print('\n=== DEPLOY COMPLETE ===')
     print('Reboot or start services manually:')
-    print(f'  ssh {HOST} "echo {SUDO_PASS} | sudo -S systemctl start motor_control.service watchdog.service"')
+    print(f'  ssh {HOST} "sudo systemctl start motor_control.service watchdog.service"')
 
 except Exception as e:
     print(f'Deploy failed: {e}', file=sys.stderr)

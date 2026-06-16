@@ -10,6 +10,8 @@ WorkingDirectory=/home/r2tele/motor_control
 ExecStart=/usr/bin/python3 /home/r2tele/motor_control/watchdog.py
 Restart=on-failure
 RestartSec=5
+MemoryMax=64M
+LimitNOFILE=512
 
 [Install]
 WantedBy=multi-user.target

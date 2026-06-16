@@ -137,6 +137,14 @@
     margin-top: 4px;
   }
 
+  .error-toast {
+    position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%);
+    background: #e94560; color: #fff; padding: 8px 16px; border-radius: 8px;
+    font-size: 0.8rem; z-index: 300; opacity: 0; transition: opacity 0.3s;
+    pointer-events: none; max-width: 80%; text-align: center;
+  }
+  .error-toast.visible { opacity: 1; }
+
   .overlay {
     position: fixed; inset: 0; z-index: 999;
     background: rgba(10, 10, 30, 0.75);
@@ -158,15 +166,9 @@
   .overlay .sub {
     font-size: 1.2rem; font-weight: 600; color: #e94560;
   }
-  .overlay .dots::after {
-    content: ''; animation: dots 1.5s steps(4, end) infinite;
-    font-size: 1.5rem; letter-spacing: 4px;
-  }
-  @keyframes dots {
-    0% { content: ''; }
-    25% { content: '.'; }
-    50% { content: '..'; }
-    75% { content: '...'; }
+  .overlay .dots {
+    font-size: 1.5rem; letter-spacing: 4px; min-width: 2em;
+    text-align: center; color: #e94560;
   }
   @keyframes glow {
     0%, 100% { opacity: 0.3; text-shadow: 0 0 8px rgba(233,69,96,0.3); }
@@ -354,11 +356,20 @@
   <div class="motor-display control" id="motor-display"></div>
 
   <div class="status-bar" id="status-bar"></div>
+  <div class="error-toast" id="error-toast"></div>
 
   <div class="overlay" id="reconnect-overlay">
     <div style="font-size:0.85rem;color:#888;letter-spacing:1px">Connection lost</div>
     <div class="msg">Reconnecting</div>
-    <div class="dots"></div>
+    <div class="dots" id="dots-el"></div>
+  </div>
+
+  <div class="overlay" id="shutdown-confirm-overlay">
+    <div class="msg" style="font-size:1.2rem;animation:none">Shut down the Pi?</div>
+    <div style="display:flex;gap:16px;margin-top:8px">
+      <button id="shutdown-yes" style="padding:12px 32px;background:#e94560;color:#fff;border:none;border-radius:8px;font-size:1rem;font-weight:600;cursor:pointer;touch-action:manipulation">Yes</button>
+      <button id="shutdown-no" style="padding:12px 32px;background:#2a3a6e;color:#ccc;border:none;border-radius:8px;font-size:1rem;font-weight:600;cursor:pointer;touch-action:manipulation">Cancel</button>
+    </div>
   </div>
 
   <div class="settings-overlay" id="settings-overlay">
@@ -424,6 +435,13 @@ const limiterVal = document.getElementById('limiter-val');
 const resSlider = document.getElementById('res-slider');
 const resVal = document.getElementById('res-val');
 const RES_LABELS = ['320×240', '640×480', '800×600', '1024×768', '1280×960'];
+function debounce(fn, delay) {
+  let timer = null;
+  return function(...args) {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn.apply(this, args), delay);
+  };
+}
 const fpsSlider = document.getElementById('fps-slider');
 const fpsVal = document.getElementById('fps-val');
 function fpsLabel(v) { return v == 0 ? 'Off' : (v == 60 ? 'Uncapped' : v + ' FPS'); }
@@ -456,8 +474,11 @@ function updateDisplay() {
   });
 }
 
+let _cachedLimit = parseInt(limiterSlider.value) / 100;
+limiterSlider.addEventListener('input', () => { _cachedLimit = parseInt(limiterSlider.value) / 100; });
+
 function computeMotorSpeeds(x, y) {
-  const limit = parseInt(limiterSlider.value) / 100;
+  const limit = _cachedLimit;
   const fl = (y + x) * limit;
   const fr = (y - x) * limit;
   const rl = (y + x) * limit;
@@ -486,7 +507,6 @@ function sendSpeeds(speeds) {
 function flushSpeeds() {
   const speeds = computeMotorSpeeds(joyX, joyY);
   socket.emit('set_speeds', { speeds });
-  lastSpeedSend = Date.now();
 }
 
 function clientToJoy(clientX, clientY) {
@@ -519,8 +539,13 @@ function applyJoy(x, y) {
 }
 
 let chaseId = null;
+let lastChaseTime = 0;
 
-function chaseStep() {
+function chaseStep(timestamp) {
+  if (!lastChaseTime) lastChaseTime = timestamp;
+  const dt = (timestamp - lastChaseTime) / (1000 / 60);
+  lastChaseTime = timestamp;
+
   const dx = targetX - joyX;
   const dy = targetY - joyY;
   const dist = Math.sqrt(dx * dx + dy * dy);
@@ -528,16 +553,25 @@ function chaseStep() {
   if (dist < 0.5) {
     applyJoy(targetX, targetY);
     chaseId = null;
+    lastChaseTime = 0;
     return;
   }
 
   const s = parseInt(speedSlider.value);
   const speed = MIN_SPEED + (MAX_SPEED - MIN_SPEED) * s / 100;
-  const maxMove = speed / 60;
+  const maxMove = speed / 60 * dt;
   const step = Math.min(maxMove / dist, 1);
 
   applyJoy(joyX + dx * step, joyY + dy * step);
   chaseId = requestAnimationFrame(chaseStep);
+}
+
+function stopChase() {
+  if (chaseId !== null) {
+    cancelAnimationFrame(chaseId);
+    chaseId = null;
+    lastChaseTime = 0;
+  }
 }
 
 function startChase(endX, endY) {
@@ -545,13 +579,6 @@ function startChase(endX, endY) {
   targetY = endY;
   if (chaseId === null) {
     chaseId = requestAnimationFrame(chaseStep);
-  }
-}
-
-function stopChase() {
-  if (chaseId !== null) {
-    cancelAnimationFrame(chaseId);
-    chaseId = null;
   }
 }
 
@@ -611,14 +638,16 @@ document.addEventListener('touchend', (e) => {
 
 // Speed slider (controls return-to-center damping)
 speedSlider.addEventListener('input', () => {
+  speedSlider._touched = true;
   speedVal.textContent = speedSlider.value + '%';
-  fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({joystick_speed: parseInt(speedSlider.value)}) }).catch(()=>{});
+  fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({joystick_speed: parseInt(speedSlider.value)}) }).catch(() => showError('Failed to save joystick speed'));
 });
 
 // Speed Limiter slider (scales motor output)
 limiterSlider.addEventListener('input', () => {
+  limiterSlider._touched = true;
   limiterVal.textContent = limiterSlider.value + '%';
-  fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({max_speed_limiter: parseInt(limiterSlider.value)}) }).catch(()=>{});
+  fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({max_speed_limiter: parseInt(limiterSlider.value)}) }).catch(() => showError('Failed to save speed limiter'));
   if (active) {
     const speeds = computeMotorSpeeds(joyX, joyY);
     sendSpeeds(speeds);
@@ -626,9 +655,7 @@ limiterSlider.addEventListener('input', () => {
 });
 
 // Resolution slider
-resSlider.addEventListener('input', async () => {
-  const idx = parseInt(resSlider.value);
-  resVal.textContent = RES_LABELS[idx];
+const debouncedSetResolution = debounce(async (idx) => {
   try {
     const r = await fetch('/api/set_resolution', {
       method: 'POST',
@@ -639,21 +666,39 @@ resSlider.addEventListener('input', async () => {
     if (d.ok) {
       const cam = document.getElementById('cam-feed');
       cam.src = '/video_feed?' + Date.now();
+    } else {
+      showError('Failed to change resolution');
     }
-  } catch (_) {}
+  } catch (_) {
+    showError('Failed to change resolution');
+  }
+}, 300);
+
+resSlider.addEventListener('input', async () => {
+  const idx = parseInt(resSlider.value);
+  resVal.textContent = RES_LABELS[idx];
+  debouncedSetResolution(idx);
 });
 
 // Frame rate slider
-fpsSlider.addEventListener('input', async () => {
-  const v = parseInt(fpsSlider.value);
-  fpsVal.textContent = fpsLabel(v);
+const debouncedSetFps = debounce(async (v) => {
   try {
-    await fetch('/api/set_framerate', {
+    const r = await fetch('/api/set_framerate', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({fps: v}),
     });
-  } catch (_) {}
+    const d = await r.json();
+    if (!d.ok) showError('Failed to change frame rate');
+  } catch (_) {
+    showError('Failed to change frame rate');
+  }
+}, 300);
+
+fpsSlider.addEventListener('input', async () => {
+  const v = parseInt(fpsSlider.value);
+  fpsVal.textContent = fpsLabel(v);
+  debouncedSetFps(v);
 });
 
 // Shutdown button – 5s long-press, icon countdown
@@ -673,6 +718,8 @@ function shutdownAbort() {
   shutdownBtn.classList.remove('holding');
 }
 
+const shutdownConfirmOverlay = document.getElementById('shutdown-confirm-overlay');
+
 function shutdownStart() {
   if (shutdownHolding) return;
   shutdownHolding = true;
@@ -689,15 +736,21 @@ function shutdownStart() {
       shutdownCount.style.display = 'none';
       shutdownBtn.classList.remove('holding');
       shutdownHolding = false;
-      if (confirm('Shut down the Pi?')) {
-        document.getElementById('settings-overlay').classList.remove('open');
-        fetch('/api/shutdown', { method: 'POST' });
-      }
+      document.getElementById('settings-overlay').classList.remove('open');
+      shutdownConfirmOverlay.classList.add('visible');
       return;
     }
     shutdownCount.textContent = shutdownCountdown;
   }, 1000);
 }
+
+document.getElementById('shutdown-yes').addEventListener('click', () => {
+  shutdownConfirmOverlay.classList.remove('visible');
+  fetch('/api/shutdown', { method: 'POST' });
+});
+document.getElementById('shutdown-no').addEventListener('click', () => {
+  shutdownConfirmOverlay.classList.remove('visible');
+});
 
 shutdownBtn.addEventListener('mousedown', shutdownStart);
 shutdownBtn.addEventListener('touchstart', (e) => { e.preventDefault(); shutdownStart(); }, { passive: false });
@@ -781,14 +834,37 @@ document.getElementById('stats-close').addEventListener('click', closeStats);
 document.getElementById('stats-back').addEventListener('click', closeStats);
 
 const overlay = document.getElementById('reconnect-overlay');
+const dotsEl = document.getElementById('dots-el');
+let dotsTimer = null;
+function startDots() {
+  let c = 0;
+  dotsTimer = setInterval(() => {
+    c = (c + 1) % 4;
+    dotsEl.textContent = '.'.repeat(c);
+  }, 400);
+}
+function stopDots() {
+  if (dotsTimer) { clearInterval(dotsTimer); dotsTimer = null; }
+  dotsEl.textContent = '';
+}
+
+let errorToastTimer = null;
+function showError(msg) {
+  const el = document.getElementById('error-toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add('visible');
+  clearTimeout(errorToastTimer);
+  errorToastTimer = setTimeout(() => el.classList.remove('visible'), 3000);
+}
 
 // Load saved slider positions from server
 fetch('/api/settings').then(r => r.json()).then(d => {
-  if (d.joystick_speed != null) { speedSlider.value = d.joystick_speed; speedVal.textContent = d.joystick_speed + '%'; }
-  if (d.max_speed_limiter != null) { limiterSlider.value = d.max_speed_limiter; limiterVal.textContent = d.max_speed_limiter + '%'; }
+  if (d.joystick_speed != null && !speedSlider._touched) { speedSlider.value = d.joystick_speed; speedVal.textContent = d.joystick_speed + '%'; }
+  if (d.max_speed_limiter != null && !limiterSlider._touched) { limiterSlider.value = d.max_speed_limiter; limiterVal.textContent = d.max_speed_limiter + '%'; }
   if (d.resolution_index != null) { resSlider.value = d.resolution_index; resVal.textContent = RES_LABELS[d.resolution_index]; }
   if (d.fps != null && d.fps >= 0) { fpsSlider.value = d.fps; fpsVal.textContent = fpsLabel(d.fps); }
-}).catch(()=>{});
+}).catch(() => showError('Failed to load settings'));
 
 const socket = io({
   reconnectionDelay: 250,
@@ -799,6 +875,8 @@ const socket = io({
 socket.on('connect', () => {
   document.body.classList.remove('disconnected');
   overlay.classList.remove('visible');
+  stopDots();
+  socket.emit('stop');
   connDot.className = 'conn-dot online';
   connLabel.textContent = 'online';
   connLabel.className = 'conn-label online';
@@ -810,6 +888,7 @@ socket.on('connect', () => {
 socket.on('disconnect', () => {
   document.body.classList.add('disconnected');
   overlay.classList.add('visible');
+  startDots();
   connDot.className = 'conn-dot offline';
   connLabel.textContent = 'offline';
   connLabel.className = 'conn-label offline';
@@ -850,6 +929,27 @@ startCamPoll();
 
 socket.on('status', () => {
   // server echoes not used — client is the authoritative speed source
+});
+
+// Pause background polling when page is hidden (saves battery/data)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (fpsPoll) { clearInterval(fpsPoll); fpsPoll = null; }
+    if (camPoll) { clearInterval(camPoll); camPoll = null; }
+    if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
+  } else {
+    if (!fpsPoll) fpsPoll = setInterval(async () => {
+      try {
+        const r = await fetch('/api/camera_status');
+        const d = await r.json();
+        fpsEl.textContent = Math.round(d.fps || 0) + ' fps';
+      } catch (_) {}
+    }, 2000);
+    if (!camPoll) startCamPoll();
+    if (statsOverlay.classList.contains('open') && !statsInterval) {
+      statsInterval = setInterval(fetchStats, 5000);
+    }
+  }
 });
 </script>
 </body>

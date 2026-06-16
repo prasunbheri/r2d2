@@ -10,8 +10,10 @@ WorkingDirectory=/home/r2tele/motor_control
 ExecStart=/usr/bin/python3 /home/r2tele/motor_control/app.py
 Restart=on-failure
 RestartSec=2
-StartLimitInterval=60
-StartLimitBurst=3
+StartLimitInterval=120
+StartLimitBurst=5
+MemoryMax=256M
+LimitNOFILE=1024
 
 [Install]
 WantedBy=multi-user.target

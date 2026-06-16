@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import tests.mock_pigpio as mock_pigpio
@@ -72,6 +73,32 @@ class TestSetSpeed:
         assert statuses[-1]['speeds']['FL'] == 40
         client.disconnect()
 
+    def test_set_speeds_invalid_data_ignored(self):
+        app_module.controller.stop_all()
+        client = sio.test_client(app)
+        client.emit('set_speeds', 'invalid')
+        time.sleep(0.05)
+        for m in MOTOR_NAMES:
+            assert app_module.controller.get_speed(m) == 0
+        client.disconnect()
+
+    def test_set_speeds_non_dict_speeds_ignored(self):
+        app_module.controller.stop_all()
+        app_module.controller.set_speed('FL', 50)
+        client = sio.test_client(app)
+        client.emit('set_speeds', {'speeds': 'invalid'})
+        time.sleep(0.05)
+        assert app_module.controller.get_speed('FL') == 50
+        client.disconnect()
+
+    def test_set_speeds_unknown_motor_ignored(self):
+        app_module.controller.stop_all()
+        client = sio.test_client(app)
+        client.emit('set_speeds', {'speeds': {'XX': 50, 'FL': 50}})
+        time.sleep(0.05)
+        assert app_module.controller.get_speed('FL') == 50
+        client.disconnect()
+
     def test_set_speeds_multiple(self):
         app_module.controller.stop_all()
         client = self._make_client()
@@ -87,6 +114,15 @@ class TestSetSpeed:
         assert speeds['RL'] == 25
         assert speeds['RR'] == -25
         client.disconnect()
+
+
+class TestHealth:
+
+    def test_health_endpoint(self):
+        with app.test_client() as client:
+            resp = client.get('/api/health')
+            assert resp.status_code == 200
+            assert resp.json == {'ok': True}
 
 
 class TestStop:

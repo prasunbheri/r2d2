@@ -11,7 +11,7 @@ import importlib
 import motor_control as mc_module
 importlib.reload(mc_module)
 
-from motor_control import MotorController, MOTOR_NAMES, MOTOR_PINS, validate_motor, clamp_speed, PWM_FREQ, PWM_RANGE
+from motor_control import MotorController, MOTOR_NAMES, MOTOR_PINS, validate_motor, clamp_speed, PWM_FREQ, PWM_RANGE, SLEW_INTERVAL
 
 
 def _fresh():
@@ -257,6 +257,53 @@ class TestGetSpeed:
             pass
 
 
+class TestWatchdog:
+
+    def test_timeout_stops_motors_instantly(self):
+        mc = _fresh()
+        mc.set_all(100)
+        _sync(mc)
+        assert mc._current_speed['FL'] == 100
+        assert mc.pi.pwm_duty[MOTOR_PINS['FL']['pwm']] == 1000
+        mc._last_cmd_time = time.time() - 5
+        time.sleep(SLEW_INTERVAL * 3)
+        assert mc._current_speed['FL'] == 0
+        assert mc.pi.pwm_duty[MOTOR_PINS['FL']['pwm']] == 0
+
+    def test_timeout_resets_on_new_command(self):
+        mc = _fresh()
+        mc.set_all(100)
+        _sync(mc)
+        mc._last_cmd_time = time.time() - 5
+        time.sleep(SLEW_INTERVAL * 3)
+        assert mc._current_speed['FL'] == 0
+        mc.set_speed('FL', 50)
+        _sync(mc)
+        assert mc._current_speed['FL'] == 50
+
+
+class TestReconnect:
+
+    def test_reconnect_succeeds(self):
+        mc = _fresh()
+        mc.pi.connected = False
+        assert mc._reconnect() is True
+        assert mc.pi.connected is True
+        for name in MOTOR_NAMES:
+            pins = MOTOR_PINS[name]
+            assert mc.pi.modes[pins['dir']] == mock_pigpio.OUTPUT
+            assert mc.pi.modes[pins['pwm']] == mock_pigpio.OUTPUT
+
+    def test_reconnect_fails(self):
+        mc = _fresh()
+        mock_pigpio.set_connected(False)
+        try:
+            mc.pi.connected = False
+            assert mc._reconnect() is False
+        finally:
+            mock_pigpio.set_connected(True)
+
+
 class TestCleanup:
 
     def test_stops_and_disconnects(self):
@@ -267,3 +314,21 @@ class TestCleanup:
         for m in MOTOR_NAMES:
             assert mc.pi.pwm_duty[MOTOR_PINS[m]['pwm']] == 0
         assert mc.pi.connected is False
+
+
+class TestApplyPwm:
+
+    def test_preserves_target_speed_on_error(self):
+        mc = _fresh()
+        mc.set_speed('FL', 50)
+        mc._current_speed['FL'] = 50
+        original_write = mc.pi.write
+        original_reconnect = mc._reconnect
+        mc.pi.write = lambda *a, **kw: (_ for _ in ()).throw(IOError('mock'))
+        mc._reconnect = lambda: False
+        target_before = mc._target_speed['FL']
+        mc._apply_pwm('FL')
+        assert mc._target_speed['FL'] == target_before
+        assert mc._current_speed['FL'] == 0
+        mc.pi.write = original_write
+        mc._reconnect = original_reconnect
