@@ -591,7 +591,7 @@ def main():
     logger.info('Motors: %s', ', '.join(MOTOR_NAMES))
     logger.info('Camera initializing in background...')
     logger.info('=' * 40)
-    serve(app, host='0.0.0.0', port=port, threads=8)
+    serve(app, host='0.0.0.0', port=port, threads=4)
 
 
 if __name__ == '__main__':
