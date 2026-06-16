@@ -12,6 +12,8 @@ PWM_RANGE: int = 1000
 SLEW_RATE: int = 7
 SLEW_INTERVAL: float = 0.02
 WATCHDOG_TIMEOUT: float = 2.0
+PIGPIO_RETRY_ATTEMPTS: int = 15
+PIGPIO_RETRY_INTERVAL: float = 1.0
 
 MOTOR_PINS: Dict[str, dict] = {
     'FL': {'dir': 6,  'pwm': 12},
@@ -41,9 +43,15 @@ class MotorController:
         self.lock: threading.Lock = threading.Lock()
         self._pi_host: Optional[str] = pi_host
         self.pi: pigpio.pi = pigpio.pi(pi_host)
+        for _ in range(PIGPIO_RETRY_ATTEMPTS):
+            if self.pi.connected:
+                break
+            time.sleep(PIGPIO_RETRY_INTERVAL)
+            self.pi = pigpio.pi(pi_host)
         if not self.pi.connected:
             raise ConnectionError(
-                "Cannot connect to pigpio daemon. "
+                f"Cannot connect to pigpio daemon after "
+                f"{int(PIGPIO_RETRY_ATTEMPTS * PIGPIO_RETRY_INTERVAL)}s. "
                 "Is pigpiod running? (sudo systemctl start pigpiod)"
             )
         self._target_speed: Dict[str, int] = {m: 0 for m in MOTOR_NAMES}

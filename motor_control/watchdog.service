@@ -1,7 +1,7 @@
 [Unit]
 Description=R2 Watchdog Service Monitor
-After=pigpiod.service motor_control.service
-Requires=pigpiod.service motor_control.service
+After=pigpiod.service
+Wants=motor_control.service
 
 [Service]
 Type=simple

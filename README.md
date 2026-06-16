@@ -632,15 +632,15 @@ The watchdog drives a standard LED on **GPIO 5** (via sysfs, not pigpio).
 
 ## Testing
 
-The project includes **51 unit tests** with full hardware mocking — no Pi required.
+The project includes **50 unit tests** with full hardware mocking — no Pi required.
 
 ```
 tests/
 ├── __init__.py
 ├── mock_pigpio.py          # Complete pigpio mock
 ├── test_motor_control.py   # 29 tests — MotorController
-├── test_app.py             # 12 tests — Flask + SocketIO
-└── test_watchdog.py        # 10 tests — Watchdog
+├── test_app.py             # 7 tests — Flask + SocketIO
+└── test_watchdog.py        # 14 tests — Watchdog
 ```
 
 **Run tests:**
@@ -896,8 +896,8 @@ r2d2/
 │       ├── __init__.py            # Package marker
 │       ├── mock_pigpio.py         # Complete pigpio mock for testing
 │       ├── test_motor_control.py  # 29 tests
-│       ├── test_app.py            # 12 tests
-│       └── test_watchdog.py       # 10 tests
+│       ├── test_app.py            # 7 tests
+│       └── test_watchdog.py       # 14 tests
 │
 └── (other project files)
 ```

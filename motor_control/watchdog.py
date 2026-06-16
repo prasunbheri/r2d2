@@ -151,7 +151,7 @@ def restart_service(name: str) -> None:
         logger.warning('restart_service(%s) failed: %s', name, e)
 
 
-def wait_for_services(led: LED, timeout: float = 60) -> bool:
+def wait_for_services(led: LED, timeout: float = 120) -> bool:
     start = time.time()
     while time.time() - start < timeout:
         all_active = all(service_active(s) for s in REQUIRED_SERVICES)
@@ -172,6 +172,10 @@ def main():
 
     atexit.register(_cleanup)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    # Wait for system to finish booting before starting checks — prevents
+    # watchdog's systemctl calls from congesting D-Bus during early boot.
+    time.sleep(20)
 
     ready = wait_for_services(led)
     if not ready:

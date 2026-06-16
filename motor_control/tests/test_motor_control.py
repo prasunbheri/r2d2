@@ -87,12 +87,19 @@ class TestInit:
 
     def test_fails_on_disconnected(self):
         mock_pigpio.set_connected(False)
+        import motor_control as mc_mod
+        orig_attempts = mc_mod.PIGPIO_RETRY_ATTEMPTS
+        orig_interval = mc_mod.PIGPIO_RETRY_INTERVAL
+        mc_mod.PIGPIO_RETRY_ATTEMPTS = 1
+        mc_mod.PIGPIO_RETRY_INTERVAL = 0
         try:
             MotorController()
             assert False
         except ConnectionError:
             pass
         finally:
+            mc_mod.PIGPIO_RETRY_ATTEMPTS = orig_attempts
+            mc_mod.PIGPIO_RETRY_INTERVAL = orig_interval
             mock_pigpio.set_connected(True)
 
 

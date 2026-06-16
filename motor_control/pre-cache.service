@@ -1,0 +1,13 @@
+[Unit]
+Description=Pre-cache Python bytecode into kernel page cache
+DefaultDependencies=no
+After=local-fs.target
+Before=pigpiod.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c "find /home/r2tele/motor_control -type f -name '*.pyc' -o -type f -name '*.so' 2>/dev/null | tar -cT - 2>/dev/null | dd of=/dev/null bs=4M 2>/dev/null"
+
+[Install]
+WantedBy=multi-user.target

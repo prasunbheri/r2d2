@@ -1,7 +1,8 @@
 [Unit]
 Description=R2 Motor Control Web Server
-After=pigpiod.service
+After=pigpiod.service pre-cache.service
 Requires=pigpiod.service
+Wants=pre-cache.service
 
 [Service]
 Type=simple
