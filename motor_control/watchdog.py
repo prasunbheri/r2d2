@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import sys
 import time
@@ -8,6 +9,8 @@ RECHECK_DELAY = 5
 MAX_RETRIES = 3
 
 REQUIRED_SERVICES = ['pigpiod', 'motor_control.service']
+
+logger = logging.getLogger('watchdog')
 
 SLOW_BLINK = (1.0, 1.0)
 FAST_BLINK = (0.2, 0.2)
@@ -141,11 +144,14 @@ def main():
                     led.pattern_fast_blink()
                     restart_service(service)
                     retries[service] += 1
+                    logger.info('Restarting %s (attempt %d/%d)', service, retries[service], MAX_RETRIES)
                     if retries[service] > MAX_RETRIES:
+                        logger.error('Service %s failed after %d retries', service, MAX_RETRIES)
                         led.pattern_fatal()
                     time.sleep(RECHECK_DELAY)
                     if service_active(service):
                         retries[service] = 0
+                        logger.info('Service %s recovered', service)
                 else:
                     retries[service] = 0
 

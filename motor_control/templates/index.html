@@ -158,6 +158,16 @@
   .overlay .sub {
     font-size: 1.2rem; font-weight: 600; color: #e94560;
   }
+  .overlay .dots::after {
+    content: ''; animation: dots 1.5s steps(4, end) infinite;
+    font-size: 1.5rem; letter-spacing: 4px;
+  }
+  @keyframes dots {
+    0% { content: ''; }
+    25% { content: '.'; }
+    50% { content: '..'; }
+    75% { content: '...'; }
+  }
   @keyframes glow {
     0%, 100% { opacity: 0.3; text-shadow: 0 0 8px rgba(233,69,96,0.3); }
     50% { opacity: 1; text-shadow: 0 0 24px rgba(233,69,96,0.7); }
@@ -346,9 +356,9 @@
   <div class="status-bar" id="status-bar"></div>
 
   <div class="overlay" id="reconnect-overlay">
-    <div style="font-size:0.85rem;color:#888;letter-spacing:1px">Attempting to</div>
-    <div class="msg">Reconnect</div>
-    <div class="sub"><span style="color:#888">in </span><span id="reconnect-sub">3</span><span style="color:#888"> seconds</span></div>
+    <div style="font-size:0.85rem;color:#888;letter-spacing:1px">Connection lost</div>
+    <div class="msg">Reconnecting</div>
+    <div class="dots"></div>
   </div>
 
   <div class="settings-overlay" id="settings-overlay">
@@ -356,19 +366,19 @@
       <button class="settings-close" id="settings-close">✕</button>
       <div class="speed-row">
         <div class="slider-label"><span>Joystick Speed</span><span id="speed-val">70%</span></div>
-        <input type="range" id="speed-slider" min="0" max="100" value="70">
+        <input type="range" id="speed-slider" min="10" max="100" step="5" value="70">
       </div>
       <div class="speed-row">
-        <div class="slider-label"><span>Max Speed Limiter</span><span id="limiter-val">50%</span></div>
-        <input type="range" id="limiter-slider" min="0" max="100" value="50">
+        <div class="slider-label"><span>Speed Limiter</span><span id="limiter-val">50%</span></div>
+        <input type="range" id="limiter-slider" min="0" max="100" step="5" value="50">
       </div>
       <div class="speed-row">
         <div class="slider-label"><span>Resolution</span><span id="res-val">640×480</span></div>
         <input type="range" id="res-slider" min="0" max="4" value="1" step="1">
       </div>
       <div class="speed-row">
-        <div class="slider-label"><span>Frame Rate</span><span id="fps-val">12 FPS</span></div>
-        <input type="range" id="fps-slider" min="0" max="60" value="12" step="1">
+        <div class="slider-label"><span>Frame Rate</span><span id="fps-val">9 FPS</span></div>
+        <input type="range" id="fps-slider" min="0" max="60" value="9" step="1">
       </div>
       <button class="menu-corner-btn menu-bottom-left" id="shutdown-btn">
         <span id="shutdown-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg></span>
@@ -771,11 +781,6 @@ document.getElementById('stats-close').addEventListener('click', closeStats);
 document.getElementById('stats-back').addEventListener('click', closeStats);
 
 const overlay = document.getElementById('reconnect-overlay');
-const reconnectSub = document.getElementById('reconnect-sub');
-
-let countdownTimer = null;
-let countdown = 3;
-let countdownPause = false;
 
 // Load saved slider positions from server
 fetch('/api/settings').then(r => r.json()).then(d => {
@@ -786,14 +791,12 @@ fetch('/api/settings').then(r => r.json()).then(d => {
 }).catch(()=>{});
 
 const socket = io({
-  reconnectionDelay: 5000,
-  reconnectionDelayMax: 5000,
-  randomizationFactor: 0,
+  reconnectionDelay: 250,
+  reconnectionDelayMax: 3000,
+  transports: ['polling'],
 });
 
 socket.on('connect', () => {
-  countdownPause = false;
-  if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
   document.body.classList.remove('disconnected');
   overlay.classList.remove('visible');
   connDot.className = 'conn-dot online';
@@ -805,32 +808,12 @@ socket.on('connect', () => {
 });
 
 socket.on('disconnect', () => {
-  countdown = 3;
-  reconnectSub.textContent = '3';
   document.body.classList.add('disconnected');
   overlay.classList.add('visible');
   connDot.className = 'conn-dot offline';
   connLabel.textContent = 'offline';
   connLabel.className = 'conn-label offline';
   statusBar.textContent = 'Connection lost.';
-  if (countdownTimer) clearInterval(countdownTimer);
-  countdownTimer = setInterval(() => {
-    if (countdownPause) return;
-    countdown--;
-    if (countdown < 0) {
-      countdownPause = true;
-      reconnectSub.textContent = '';
-      setTimeout(() => { countdown = 3; reconnectSub.textContent = 3; countdownPause = false; }, 1000);
-      return;
-    }
-    reconnectSub.textContent = countdown;
-  }, 1000);
-});
-
-socket.io.on('reconnect_attempt', () => {
-  countdownPause = false;
-  countdown = 3;
-  reconnectSub.textContent = '3';
 });
 
 socket.on('camera_status', (data) => {

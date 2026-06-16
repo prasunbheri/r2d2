@@ -8,11 +8,12 @@ PI_DIR="/home/r2tele/motor_control"
 echo "Deploying to $PI_HOST:$PI_DIR ..."
 
 # Create remote directory
-ssh "$PI_HOST" "mkdir -p $PI_DIR/templates $PI_DIR/tests"
+ssh "$PI_HOST" "mkdir -p $PI_DIR/templates $PI_DIR/tests $PI_DIR/static"
 
 # Copy application files
 scp motor_control.py app.py watchdog.py "$PI_HOST:$PI_DIR/"
 scp templates/index.html "$PI_HOST:$PI_DIR/templates/"
+scp static/socket.io.min.js "$PI_HOST:$PI_DIR/static/"
 scp motor_control.service watchdog.service "$PI_HOST:$PI_DIR/"
 
 # Copy tests

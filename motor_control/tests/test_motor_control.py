@@ -1,8 +1,9 @@
 import sys
 import os
+import time
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-# Patch pigpio BEFORE importing motor_control
 import tests.mock_pigpio as mock_pigpio
 sys.modules['pigpio'] = mock_pigpio
 
@@ -16,7 +17,25 @@ from motor_control import MotorController, MOTOR_NAMES, MOTOR_PINS, validate_mot
 def _fresh():
     mc = MotorController()
     mc.pi._reset()
+    mc.slew_rate = 1000
+    for name in MOTOR_NAMES:
+        pins = MOTOR_PINS[name]
+        mc.pi.set_mode(pins['dir'], mock_pigpio.OUTPUT)
+        mc.pi.set_mode(pins['pwm'], mock_pigpio.OUTPUT)
+        mc.pi.set_PWM_frequency(pins['pwm'], PWM_FREQ)
+        mc.pi.set_PWM_range(pins['pwm'], PWM_RANGE)
+        mc.pi.write(pins['dir'], 0)
+        mc.pi.set_PWM_dutycycle(pins['pwm'], 0)
     return mc
+
+
+def _sync(mc, timeout=0.5):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if all(mc._current_speed[m] == mc._target_speed[m] for m in MOTOR_NAMES):
+            time.sleep(0.01)
+            return
+        time.sleep(0.005)
 
 
 class TestValidateMotor:
@@ -55,7 +74,8 @@ class TestInit:
 
     def test_all_motors_initialized(self):
         mc = MotorController()
-        assert list(mc._speed.keys()).sort() == MOTOR_NAMES.sort()
+        assert list(mc._target_speed.keys()).sort() == MOTOR_NAMES.sort()
+        assert list(mc._current_speed.keys()).sort() == MOTOR_NAMES.sort()
         for n in MOTOR_NAMES:
             pins = MOTOR_PINS[n]
             assert mc.pi.modes[pins['dir']] == mock_pigpio.OUTPUT
@@ -81,44 +101,51 @@ class TestSetSpeed:
     def test_forward(self):
         mc = _fresh()
         mc.set_speed('FL', 50)
+        _sync(mc)
         assert mc.pi.writes[MOTOR_PINS['FL']['dir']] == 1
         assert mc.pi.pwm_duty[MOTOR_PINS['FL']['pwm']] == 500
-        assert mc._speed['FL'] == 50
+        assert mc._current_speed['FL'] == 50
 
     def test_reverse(self):
         mc = _fresh()
         mc.set_speed('FL', -50)
+        _sync(mc)
         assert mc.pi.writes[MOTOR_PINS['FL']['dir']] == 0
         assert mc.pi.pwm_duty[MOTOR_PINS['FL']['pwm']] == 500
-        assert mc._speed['FL'] == -50
+        assert mc._current_speed['FL'] == -50
 
     def test_zero(self):
         mc = _fresh()
         mc.set_speed('FR', 0)
+        _sync(mc)
         assert mc.pi.pwm_duty[MOTOR_PINS['FR']['pwm']] == 0
-        assert mc._speed['FR'] == 0
+        assert mc._current_speed['FR'] == 0
 
     def test_full_forward(self):
         mc = _fresh()
         mc.set_speed('RL', 100)
+        _sync(mc)
         assert mc.pi.writes[MOTOR_PINS['RL']['dir']] == 1
         assert mc.pi.pwm_duty[MOTOR_PINS['RL']['pwm']] == 1000
 
     def test_full_reverse(self):
         mc = _fresh()
         mc.set_speed('RR', -100)
+        _sync(mc)
         assert mc.pi.writes[MOTOR_PINS['RR']['dir']] == 0
         assert mc.pi.pwm_duty[MOTOR_PINS['RR']['pwm']] == 1000
 
     def test_clamp_above(self):
         mc = _fresh()
         mc.set_speed('FL', 200)
-        assert mc._speed['FL'] == 100
+        _sync(mc)
+        assert mc._current_speed['FL'] == 100
 
     def test_clamp_below(self):
         mc = _fresh()
         mc.set_speed('FL', -200)
-        assert mc._speed['FL'] == -100
+        _sync(mc)
+        assert mc._current_speed['FL'] == -100
 
     def test_invalid_motor(self):
         mc = _fresh()
@@ -132,23 +159,27 @@ class TestSetSpeed:
         mc = _fresh()
         for m, s in {'FL': 80, 'FR': -60, 'RL': 30, 'RR': -90}.items():
             mc.set_speed(m, s)
-        assert mc._speed == {'FL': 80, 'FR': -60, 'RL': 30, 'RR': -90}
+        _sync(mc)
+        assert mc._current_speed == {'FL': 80, 'FR': -60, 'RL': 30, 'RR': -90}
 
     def test_reverse_duty_cycle_scaling(self):
         mc = _fresh()
         mc.set_speed('FL', -25)
+        _sync(mc)
         assert mc.pi.pwm_duty[MOTOR_PINS['FL']['pwm']] == 250
         assert mc.pi.writes[MOTOR_PINS['FL']['dir']] == 0
 
     def test_forward_duty_cycle_scaling(self):
         mc = _fresh()
         mc.set_speed('FL', 75)
+        _sync(mc)
         assert mc.pi.pwm_duty[MOTOR_PINS['FL']['pwm']] == 750
         assert mc.pi.writes[MOTOR_PINS['FL']['dir']] == 1
 
     def test_speed_0_forward_dir(self):
         mc = _fresh()
         mc.set_speed('FL', 0)
+        _sync(mc)
         assert mc.pi.pwm_duty[MOTOR_PINS['FL']['pwm']] == 0
 
 
@@ -157,15 +188,17 @@ class TestSetSpeeds:
     def test_multiple(self):
         mc = _fresh()
         mc.set_speeds({'FL': 50, 'FR': -50})
-        assert mc._speed['FL'] == 50
-        assert mc._speed['FR'] == -50
+        _sync(mc)
+        assert mc._current_speed['FL'] == 50
+        assert mc._current_speed['FR'] == -50
 
     def test_partial(self):
         mc = _fresh()
         mc.set_speed('FL', 80)
         mc.set_speeds({'FR': 40})
-        assert mc._speed['FL'] == 80
-        assert mc._speed['FR'] == 40
+        _sync(mc)
+        assert mc._current_speed['FL'] == 80
+        assert mc._current_speed['FR'] == 40
 
 
 class TestSetAll:
@@ -173,14 +206,16 @@ class TestSetAll:
     def test_all_same(self):
         mc = _fresh()
         mc.set_all(75)
+        _sync(mc)
         for m in MOTOR_NAMES:
-            assert mc._speed[m] == 75
+            assert mc._current_speed[m] == 75
 
     def test_all_reverse(self):
         mc = _fresh()
         mc.set_all(-100)
+        _sync(mc)
         for m in MOTOR_NAMES:
-            assert mc._speed[m] == -100
+            assert mc._current_speed[m] == -100
 
 
 class TestStopAll:
@@ -188,9 +223,11 @@ class TestStopAll:
     def test_all_zero(self):
         mc = _fresh()
         mc.set_all(80)
+        _sync(mc)
         mc.stop_all()
+        _sync(mc)
         for m in MOTOR_NAMES:
-            assert mc._speed[m] == 0
+            assert mc._current_speed[m] == 0
             assert mc.pi.pwm_duty[MOTOR_PINS[m]['pwm']] == 0
 
 
@@ -225,6 +262,7 @@ class TestCleanup:
     def test_stops_and_disconnects(self):
         mc = _fresh()
         mc.set_all(50)
+        _sync(mc)
         mc.cleanup()
         for m in MOTOR_NAMES:
             assert mc.pi.pwm_duty[MOTOR_PINS[m]['pwm']] == 0

@@ -20,6 +20,7 @@ FILES = [
     ('tests/test_motor_control.py', 'tests/'),
     ('tests/test_app.py', 'tests/'),
     ('tests/test_watchdog.py', 'tests/'),
+    ('static/socket.io.min.js', 'static/'),
 ]
 
 SSH_OPTS = '-o StrictHostKeyChecking=no -o PreferredAuthentications=password'
@@ -51,7 +52,7 @@ try:
     print('Connected.')
 
     print('Creating remote directories...')
-    ssh(f'mkdir -p {REMOTE_DIR}/templates {REMOTE_DIR}/tests')
+    ssh(f'mkdir -p {REMOTE_DIR}/templates {REMOTE_DIR}/tests {REMOTE_DIR}/static')
 
     for entry in FILES:
         if isinstance(entry, tuple):

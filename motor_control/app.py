@@ -29,7 +29,7 @@ threading.excepthook = lambda args: logger.error(
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(24).hex()
-sio = SocketIO(app, cors_allowed_origins='*', async_mode='threading')
+sio = SocketIO(app, cors_allowed_origins='*', async_mode='threading', transports=['polling'])
 
 controller = None
 _update_lock = threading.Lock()
@@ -43,7 +43,7 @@ _last_frame_time = 0.0
 
 RESOLUTIONS = [(320, 240), (640, 480), (800, 600), (1024, 768), (1280, 960)]
 current_resolution = 1  # index into RESOLUTIONS
-target_fps = 12  # desired framerate; None = uncapped
+target_fps = 9  # desired framerate; None = uncapped
 joystick_speed = 70  # 0-100
 max_speed_limiter = 50  # 0-100
 _fps_controls = None  # (min_dur, max_dur) last applied via set_controls
@@ -131,6 +131,20 @@ def _start_camera():
             logger.info('Camera online %dx%d HW MJPEG', w, h)
         except Exception as e:
             camera_available = False
+            if camera is not None:
+                try:
+                    camera.stop_recording()
+                except Exception:
+                    pass
+                try:
+                    camera.stop()
+                except Exception:
+                    pass
+                try:
+                    camera.close()
+                except Exception:
+                    pass
+                camera = None
             logger.error('Camera start failed: %s', e)
 
 
@@ -250,6 +264,7 @@ def api_settings():
 
 @app.route('/api/shutdown', methods=['POST'])
 def api_shutdown():
+    controller.stop_all()
     th = threading.Thread(target=lambda: os.system('echo r2tele | sudo -S shutdown -h now'), daemon=True)
     th.start()
     return jsonify({'ok': True})
@@ -345,8 +360,20 @@ def api_stats():
 def heartbeat_log():
     while True:
         time.sleep(60)
-        logger.info('heartbeat threads=%d cam=%s fps=%.1f',
-                     threading.active_count(), camera_available, camera_fps)
+        speeds = controller.get_all_speeds()
+        non_zero = {m: s for m, s in speeds.items() if s != 0}
+        stale = ''
+        if non_zero:
+            age = time.time() - controller._last_cmd_time
+            if age > 2:
+                stale = ' STALE'
+        if not camera_available and target_fps != 0:
+            logger.info('Camera unavailable, retrying init...')
+            th = threading.Thread(target=init_camera_async, daemon=True)
+            th.start()
+        logger.info('heartbeat threads=%d cam=%s fps=%.1f motors=%s%s',
+                     threading.active_count(), camera_available, camera_fps,
+                     non_zero, stale)
 
 @app.route('/')
 def index():
@@ -442,7 +469,7 @@ def main():
     logger.info('Motors: %s', ', '.join(MOTOR_NAMES))
     logger.info('Camera initializing in background...')
     logger.info('=' * 40)
-    serve(app, host='0.0.0.0', port=port, threads=4)
+    serve(app, host='0.0.0.0', port=port, threads=6)
 
 
 if __name__ == '__main__':
