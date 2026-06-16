@@ -131,6 +131,19 @@
     background: rgba(0,0,0,0.5); padding: 2px 5px; border-radius: 4px;
     font-family: monospace;
   }
+  .cam-placeholder {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    background: rgba(10,10,30,0.85); color: #888;
+    z-index: 10; border-radius: 8px;
+  }
+  .cam-placeholder.hidden { display: none; }
+  .cam-claim-btn {
+    background: #2a3a6e; color: #ddd; border: none; border-radius: 8px;
+    padding: 10px 20px; font-size: 0.85rem; font-weight: 600;
+    cursor: pointer; touch-action: manipulation; transition: background 0.2s;
+  }
+  .cam-claim-btn:active { background: #3a4a8e; }
 
   .status-bar {
     font-size: 0.7rem; color: #555; text-align: center;
@@ -376,6 +389,42 @@
     }
     body .gear-btn { z-index: 20; }
   }
+
+  /* Fullscreen video overlay mode */
+  .fullscreen-video .cam-wrap {
+    position: fixed; inset: 0; z-index: 50;
+    max-width: none; border-radius: 0; margin: 0;
+    height: 100%; width: 100%; aspect-ratio: auto;
+  }
+  .fullscreen-video .cam-wrap img { object-fit: contain; }
+  .fullscreen-video h1, .fullscreen-video .motor-display,
+  .fullscreen-video .status-bar { display: none; }
+  .fullscreen-video .right-col {
+    position: fixed; bottom: 16px; right: 16px;
+    z-index: 60; background: rgba(26,26,46,0.65);
+    border-radius: 16px; padding: 8px 14px;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    display: flex; flex-direction: row; align-items: center; gap: 10px;
+  }
+  .fullscreen-video .joystick-area {
+    width: 120px; height: 120px; margin: 0; opacity: 0.8;
+    transition: opacity 0.2s;
+  }
+  .fullscreen-video .joystick-area:active { opacity: 0.95; }
+  .fullscreen-video .joystick-knob { width: 40px; height: 40px; }
+  .fullscreen-video .left-controls {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+  }
+  .fullscreen-video .left-controls .controls-row { margin: 0; }
+  .fullscreen-video .left-controls .toggle-label { font-size: 0.65rem; gap: 4px; }
+  .fullscreen-video .left-controls .toggle-switch { width: 32px; height: 18px; }
+  .fullscreen-video .left-controls .toggle-switch::after { width: 14px; height: 14px; }
+  .fullscreen-video .left-controls .toggle-switch.active::after { left: 16px; }
+  .fullscreen-video .left-controls .stop-btn {
+    width: 64px; padding: 8px; font-size: 0.75rem; border-radius: 8px; margin: 0;
+  }
+  .fullscreen-video .gear-btn, .fullscreen-video .conn-indicator { z-index: 70; }
+
 </style>
 </head>
 <body>
@@ -388,6 +437,11 @@
   <div class="cam-wrap control hidden" id="cam-wrap">
     <img src="/video_feed" id="cam-feed" alt="camera">
     <div class="cam-fps" id="cam-fps">-- fps</div>
+    <div class="cam-placeholder" id="cam-placeholder">
+      <div style="font-size:1.2rem;margin-bottom:6px">📷</div>
+      <div style="font-size:0.85rem;margin-bottom:8px">Video on another device</div>
+      <button class="cam-claim-btn" id="cam-claim-btn">Show video here</button>
+    </div>
   </div>
 
   <div class="right-col">
@@ -468,7 +522,7 @@
       <div class="stats-row"><span class="stats-label">Resolution</span><span class="stats-value" id="s-res">--</span></div>
       <div class="stats-row"><span class="stats-label">CPU (1m)</span><span class="stats-value" id="s-cpu">--</span></div>
       <div class="stats-row"><span class="stats-label">Memory</span><span class="stats-value" id="s-mem">--</span></div>
-      <div class="stats-row"><span class="stats-label">Temperature</span><span class="stats-value" id="s-temp">--</span></div>
+      <div class="stats-row"><span class="stats-label">CPU Temperature</span><span class="stats-value" id="s-temp">--</span></div>
       <div class="stats-row"><span class="stats-label">TX Rate</span><span class="stats-value" id="s-tx">--</span></div>
       <div class="stats-row"><span class="stats-label">RX Rate</span><span class="stats-value" id="s-rx">--</span></div>
       <div class="stats-row"><span class="stats-label">Threads</span><span class="stats-value" id="s-threads">--</span></div>
@@ -524,7 +578,11 @@ const fpsSlider = document.getElementById('fps-slider');
 const fpsVal = document.getElementById('fps-val');
 function fpsLabel(v) { return v == 0 ? 'Off' : (v == 60 ? 'Uncapped' : v + ' FPS'); }
 
-const RADIUS = 68;
+function maxKnobDist() {
+  const br = base.offsetWidth / 2;
+  const kr = knob.offsetWidth / 2;
+  return br - kr;
+}
 const MIN_SPEED = 10;   // units/sec
 const MAX_SPEED = 300;  // units/sec
 let autoCenter = true;
@@ -594,7 +652,7 @@ function clientToJoy(clientX, clientY) {
   const dx = clientX - cx;
   const dy = clientY - cy;
   const dist = Math.sqrt(dx * dx + dy * dy);
-  const maxDist = RADIUS;
+  const maxDist = maxKnobDist();
   let clampedX = dx, clampedY = dy;
   if (dist > maxDist) {
     clampedX = (dx / dist) * maxDist;
@@ -610,7 +668,7 @@ function clientToJoy(clientX, clientY) {
 
 function applyJoy(x, y) {
   joyX = x; joyY = y;
-  const maxDist = RADIUS;
+  const maxDist = maxKnobDist();
   knob.style.transform = `translate(calc(-50% + ${(x / 100) * maxDist}px), calc(-50% + ${-(y / 100) * maxDist}px))`;
   const speeds = computeMotorSpeeds(x, y);
   sendSpeeds(speeds);
@@ -743,7 +801,7 @@ const debouncedSetResolution = debounce(async (idx) => {
     const d = await r.json();
     if (d.ok) {
       const cam = document.getElementById('cam-feed');
-      cam.src = '/video_feed?' + Date.now();
+      cam.src = '/video_feed?sid=' + (socket.id || '') + '&t=' + Date.now();
     } else {
       showError('Failed to change resolution');
     }
@@ -837,7 +895,7 @@ document.addEventListener('touchend', shutdownAbort);
 document.addEventListener('mouseleave', shutdownAbort);
 document.addEventListener('touchcancel', shutdownAbort);
 
-// FPS counter via camera_status polling (2s interval to reduce server load)
+// FPS counter via camera_status polling (5s interval to reduce server load)
 const fpsEl = document.getElementById('cam-fps');
 let fpsPoll = setInterval(async () => {
   try {
@@ -846,7 +904,7 @@ let fpsPoll = setInterval(async () => {
     const fps = d.fps || 0;
     fpsEl.textContent = Math.round(fps) + ' fps';
   } catch (_) {}
-}, 2000);
+}, 5000);
 
 // Toggle auto-center
 toggleSwitch.addEventListener('click', () => {
@@ -876,7 +934,50 @@ document.getElementById('settings-close').addEventListener('click', () => {
   document.getElementById('settings-overlay').classList.remove('open');
 });
 
-// Stats overlay
+// Keyboard controls: arrows = joystick, space = stop, tab = auto-center
+const KEY_STEP = 20;
+document.addEventListener('keydown', (e) => {
+  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+  switch (e.key) {
+    case 'ArrowUp': e.preventDefault(); startChase(joyX, Math.min(joyY + KEY_STEP, 100)); break;
+    case 'ArrowDown': e.preventDefault(); startChase(joyX, Math.max(joyY - KEY_STEP, -100)); break;
+    case 'ArrowLeft': e.preventDefault(); startChase(Math.max(joyX - KEY_STEP, -100), joyY); break;
+    case 'ArrowRight': e.preventDefault(); startChase(Math.min(joyX + KEY_STEP, 100), joyY); break;
+    case ' ': e.preventDefault(); stopBtn.click(); break;
+    case 'Tab': e.preventDefault(); toggleSwitch.click(); break;
+  }
+});
+document.addEventListener('keyup', (e) => {
+  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+  if (e.key.startsWith('Arrow') && autoCenter) {
+    e.preventDefault();
+    active = false;
+    startChase(0, 0);
+  }
+});
+
+// Fullscreen toggle: double-click on video
+let fullscreen = false;
+const camFeed = document.getElementById('cam-feed');
+camFeed.addEventListener('dblclick', async () => {
+  fullscreen = !fullscreen;
+  document.body.classList.toggle('fullscreen-video', fullscreen);
+  setTimeout(() => applyJoy(joyX, joyY), 50);
+  try {
+    if (fullscreen) {
+      await document.documentElement.requestFullscreen();
+    } else {
+      if (document.fullscreenElement) await document.exitFullscreen();
+    }
+  } catch (_) {}
+});
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && fullscreen) {
+    fullscreen = false;
+    document.body.classList.remove('fullscreen-video');
+    setTimeout(() => applyJoy(joyX, joyY), 50);
+  }
+});
 const statsOverlay = document.getElementById('stats-overlay');
 const settingsOverlay = document.getElementById('settings-overlay');
 let statsInterval = null;
@@ -950,6 +1051,33 @@ const socket = io({
   transports: ['polling'],
 });
 
+// Video ownership
+let videoOwner = false;
+
+function showVideo(src) {
+  const camWrap = document.getElementById('cam-wrap');
+  const cam = document.getElementById('cam-feed');
+  const placeholder = document.getElementById('cam-placeholder');
+  camWrap.classList.remove('hidden');
+  placeholder.classList.add('hidden');
+  cam.src = '/video_feed?sid=' + (socket.id || '') + '&t=' + Date.now();
+}
+
+function showPlaceholder() {
+  const camWrap = document.getElementById('cam-wrap');
+  const cam = document.getElementById('cam-feed');
+  const placeholder = document.getElementById('cam-placeholder');
+  camWrap.classList.remove('hidden');
+  placeholder.classList.remove('hidden');
+  cam.src = '';
+}
+
+function showVideoHere() {
+  socket.emit('claim_video');
+}
+const claimBtn = document.getElementById('cam-claim-btn');
+if (claimBtn) claimBtn.addEventListener('click', showVideoHere);
+
 socket.on('connect', () => {
   document.body.classList.remove('disconnected');
   overlay.classList.remove('visible');
@@ -959,8 +1087,7 @@ socket.on('connect', () => {
   connLabel.textContent = 'online';
   connLabel.className = 'conn-label online';
   statusBar.textContent = '';
-  const cam = document.getElementById('cam-feed');
-  if (cam) cam.src = '/video_feed?' + Date.now();
+  socket.emit('claim_video');
 });
 
 socket.on('disconnect', () => {
@@ -973,14 +1100,29 @@ socket.on('disconnect', () => {
   statusBar.textContent = 'Connection lost.';
 });
 
-socket.on('camera_status', (data) => {
-  const camWrap = document.getElementById('cam-wrap');
-  const cam = document.getElementById('cam-feed');
-  if (data.available) {
-    camWrap.classList.remove('hidden');
-    cam.src = '/video_feed?' + Date.now();
+socket.on('video_owner', (data) => {
+  videoOwner = data.sid === socket.id;
+  if (videoOwner) {
+    showVideo();
     if (camPoll) { clearInterval(camPoll); camPoll = null; }
   } else {
+    showPlaceholder();
+  }
+});
+
+socket.on('video_lost', () => {
+  videoOwner = false;
+  showPlaceholder();
+});
+
+socket.on('camera_status', (data) => {
+  const placeholder = document.getElementById('cam-placeholder');
+  if (data.available) {
+    if (!placeholder.classList.contains('hidden') || !videoOwner) return;
+    showVideo();
+    if (camPoll) { clearInterval(camPoll); camPoll = null; }
+  } else {
+    const camWrap = document.getElementById('cam-wrap');
     camWrap.classList.add('hidden');
     if (!camPoll) startCamPoll();
   }
@@ -995,15 +1137,25 @@ function startCamPoll() {
       const d = await r.json();
       if (d.available) {
         clearInterval(camPoll); camPoll = null;
-        const camWrap = document.getElementById('cam-wrap');
-        const cam = document.getElementById('cam-feed');
-        camWrap.classList.remove('hidden');
-        cam.src = '/video_feed?' + Date.now();
+        if (videoOwner) {
+          const camWrap = document.getElementById('cam-wrap');
+          const cam = document.getElementById('cam-feed');
+          camWrap.classList.remove('hidden');
+          cam.src = '/video_feed?sid=' + (socket.id || '') + '&t=' + Date.now();
+        } else {
+          const camWrap = document.getElementById('cam-wrap');
+          camWrap.classList.remove('hidden');
+        }
       }
     } catch (_) {}
   }, 3000);
 }
 startCamPoll();
+
+// Release video on page unload
+window.addEventListener('beforeunload', () => {
+  if (videoOwner) socket.emit('release_video');
+});
 
 // WiFi functions
 function openWifiPanel() {

@@ -57,6 +57,9 @@ _active_streams: int = 0
 _streams_lock: threading.Lock = threading.Lock()
 MAX_STREAMS: int = 3
 
+_video_owner_sid: Optional[str] = None
+_video_owner_lock: threading.Lock = threading.Lock()
+
 _camera_retry_in_flight: bool = False  # guard against unbounded retry threads
 
 _mem_cache: Dict[str, str] = {}  # cached /proc/meminfo dict
@@ -449,6 +452,12 @@ def index():
 @app.route('/video_feed')
 def video_feed():
     global _active_streams
+    sid = request.args.get('sid', '')
+    with _video_owner_lock:
+        if _video_owner_sid is None:
+            return jsonify({'error': 'no video owner'}), 503
+        if _video_owner_sid != sid:
+            return jsonify({'error': 'video owned elsewhere', 'owner': _video_owner_sid}), 403
     with _streams_lock:
         if _active_streams >= MAX_STREAMS:
             return jsonify({'error': 'too many streams'}), 503
@@ -457,6 +466,10 @@ def video_feed():
     def generate():
         try:
             while True:
+                with _video_owner_lock:
+                    still_owner = _video_owner_sid == sid
+                if not still_owner:
+                    break
                 frame = latest_frame
                 if frame is not None:
                     age = time.time() - latest_frame_time
@@ -483,9 +496,44 @@ def video_feed():
 
 @sio.on('connect')
 def on_connect():
+    with _video_owner_lock:
+        emit('video_owner', {'sid': _video_owner_sid})
     if controller is not None:
         emit('status', {'speeds': controller.get_all_speeds()})
     emit('camera_status', {'available': camera_available})
+
+
+@sio.on('claim_video')
+def on_claim_video(_data=None):
+    global _video_owner_sid
+    sid = request.sid
+    with _video_owner_lock:
+        old_owner = _video_owner_sid
+        _video_owner_sid = sid
+    if old_owner and old_owner != sid:
+        sio.emit('video_lost', {'new_owner': sid}, to=old_owner)
+        logger.info('Video owner: %s → %s', old_owner[:8], sid[:8])
+    else:
+        logger.info('Video owner: %s', sid[:8])
+    emit('video_owner', {'sid': sid})
+
+
+@sio.on('release_video')
+def on_release_video(_data=None):
+    global _video_owner_sid
+    with _video_owner_lock:
+        if _video_owner_sid == request.sid:
+            _video_owner_sid = None
+            logger.info('Video released by %s', request.sid[:8])
+
+
+@sio.on('disconnect')
+def on_disconnect():
+    global _video_owner_sid
+    with _video_owner_lock:
+        if _video_owner_sid == request.sid:
+            _video_owner_sid = None
+            logger.info('Video owner disconnected: %s', request.sid[:8])
 
 
 @sio.on('set_speed')
@@ -620,7 +668,7 @@ def main():
     logger.info('Motors: %s', ', '.join(MOTOR_NAMES))
     logger.info('Camera initializing in background...')
     logger.info('=' * 40)
-    serve(app, host='0.0.0.0', port=port, threads=4)
+    serve(app, host='0.0.0.0', port=port, threads=8)
 
 
 if __name__ == '__main__':
