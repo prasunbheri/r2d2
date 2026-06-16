@@ -31,7 +31,8 @@ A web-controlled 4-motor differential drive system for a Raspberry Pi Zero W, fe
   - [Motor Controller](#1-motor-controller-motor_controlpy)
   - [Web Server](#2-web-server-apppy)
   - [Watchdog](#3-watchdog-watchdogpy)
-  - [Dashboard](#4-web-dashboard-templatesindexhtml)
+  - [WiFi Manager](#4-wifi-manager-wifi_managerpy)
+  - [Dashboard](#5-web-dashboard-templatesindexhtml)
 - [API Reference](#api-reference)
   - [HTTP Endpoints](#http-endpoints)
   - [SocketIO Events](#socketio-events)
@@ -484,7 +485,36 @@ watchdog.py
 - **Max 3 retries** — after 3 consecutive failures per service, shows fatal pattern and continues (doesn't exit — tries forever at 3-retry blocks)
 - **Structured logging** — `logging.getLogger('watchdog')` logs to stderr → systemd journal
 
-### 4. Web Dashboard (`templates/index.html`)
+### 4. WiFi Manager (`wifi_manager.py`)
+
+Autonomous WiFi switching with safe fallback via NetworkManager CLI (`nmcli`). All operations run through `sudo nmcli`.
+
+```
+try_connect(ssid, password)
+│
+├── Run: nmcli device wifi connect <ssid> password <password>
+├── Wait 3s, check current_ssid()
+├── If connected to target:
+│   ├── Verify gateway reachability (ping router, then fallback hosts)
+│   ├── On success → save credentials, return {"ok": true, ip: "..."}
+│   └── On failure → _revert_or_ap()
+└── If not connected → _revert_or_ap()
+
+_revert_or_ap()
+│
+├── Try NM connection profile (preserves saved auth)
+├── Try each known SSID (newest first, up to 5)
+│   └── On each: connect + verify gateway
+├── Start AP mode (SSID: r2tele, password: r2tele)
+│   └── nmcli device wifi hotspot → 10.42.0.1:5000
+└── Report failure if all fallbacks exhausted
+```
+
+**Known Networks:** Up to 5 SSID/password pairs stored in `wifi_known.json`. Newest-first ordering; oldest evicted when limit exceeded. Backward-compatible with the legacy single-entry format.
+
+**AP Mode:** As a last resort, the Pi creates its own hotspot at `10.42.0.1:5000`. Connect to SSID `r2tele` (password `r2tele`) and navigate to that IP.
+
+### 5. Web Dashboard (`templates/index.html`)
 
 Single-page application with dark theme, mobile-first responsive design, and offline-first architecture.
 
@@ -499,6 +529,7 @@ Single-page application with dark theme, mobile-first responsive design, and off
 | **STOP Button** | Emergency stop — sets all motors to 0 immediately |
 | **Motor Speed Display** | 4-panel grid showing FL/FR/RL/RR speeds (green for forward, red for reverse) |
 | **Settings Overlay** | Gear button top-left opens modal with sliders for Joystick Speed (`step=5`, `min=10`), Speed Limiter (`step=5`), Resolution, Frame Rate |
+| **WiFi Button** | 📶 icon bottom-center (inside gear menu) — opens WiFi overlay with scan, connect, status |
 | **Shutdown Button** | ⏻ icon bottom-left — 5-second long-press with countdown, then stops motors + `sudo shutdown -h now` |
 | **Stats Button** | ℹ icon bottom-right — opens overlay polling `/api/stats` every 5s |
 | **Reconnection Overlay** | Full-screen dimmed overlay with CSS animated dots when connection lost |
@@ -585,6 +616,9 @@ Each animation frame moves the knob `per_frame_speed` pixels toward the target, 
 | `/api/shutdown` | POST | Stop motors + shutdown the Pi | — | `{"ok": true}` |
 | `/api/stats` | GET | System stats (memory/load/net/uptime/temp) | — | `{"mem": {...}, "load": [...], "net": {...}, "uptime": float, "temp": float}` |
 | `/api/debug` | GET | Debug information | — | `{"thread_count": int, "camera_available": bool, ...}` |
+| `/api/wifi/scan` | GET | Scan nearby WiFi networks | — | `{"networks": [...], "current": "SSID"}` |
+| `/api/wifi/status` | GET | Current WiFi connection info | — | `{"ssid": "...", "signal": 80, "ip": "...", "mode": "station"}` |
+| `/api/wifi/connect` | POST | Connect to a WiFi network | `{"ssid": "...", "password": "..."}` | `{"ok": true, "ssid": "...", "ip": "..."}` |
 
 **Resolution Index Mapping:**
 
@@ -632,15 +666,15 @@ The watchdog drives a standard LED on **GPIO 5** (via sysfs, not pigpio).
 
 ## Testing
 
-The project includes **50 unit tests** with full hardware mocking — no Pi required.
+The project includes **64 unit tests** with full hardware mocking — no Pi required.
 
 ```
 tests/
 ├── __init__.py
 ├── mock_pigpio.py          # Complete pigpio mock
-├── test_motor_control.py   # 29 tests — MotorController
-├── test_app.py             # 7 tests — Flask + SocketIO
-└── test_watchdog.py        # 14 tests — Watchdog
+├── test_motor_control.py   # 31 tests — MotorController
+├── test_app.py             # 11 tests — Flask + SocketIO + WiFi
+└── test_watchdog.py        # 19 tests — Watchdog
 ```
 
 **Run tests:**
@@ -881,8 +915,12 @@ r2d2/
 │   ├── app.py                     # Flask + SocketIO web server, camera management
 │   ├── motor_control.py           # 4-motor pigpio abstraction
 │   ├── watchdog.py                # sysfs GPIO service monitor + LED patterns
+│   ├── wifi_manager.py            # WiFi scanning, connection, AP fallback
+│   ├── wifi_known.json            # Runtime — last 5 trusted SSID/password pairs
 │   ├── motor_control.service      # systemd unit for web server
 │   ├── watchdog.service           # systemd unit for watchdog
+│   ├── pre-cache.service          # systemd unit for bytecode preloading
+│   ├── boot_optimize.sh           # Boot-time optimization script
 │   ├── deploy.py                  # Python deployment script (pexpect)
 │   ├── deploy.sh                  # Bash deployment script (scp + ssh)
 │   │
@@ -910,4 +948,4 @@ MIT License — see LICENSE file if present, or use freely.
 
 ---
 
-*R2 Motor Controller v2.1 — Built for Raspberry Pi Zero W with Cytron MDD20A drivers and MY6812 motors.*
+*R2 Motor Controller v2.2 — Built for Raspberry Pi Zero W with Cytron MDD20A drivers and MY6812 motors.*

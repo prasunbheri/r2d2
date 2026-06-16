@@ -14,6 +14,7 @@ from flask_socketio import SocketIO, emit
 from waitress import serve
 
 from motor_control import MotorController, MOTOR_NAMES
+import wifi_manager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -559,6 +560,34 @@ def _cleanup():
             controller.cleanup()
         except Exception:
             pass
+
+
+@app.route('/api/wifi/scan')
+def api_wifi_scan():
+    networks = wifi_manager.scan()
+    current = wifi_manager.current_ssid()
+    return jsonify({'networks': networks, 'current': current})
+
+
+@app.route('/api/wifi/status')
+def api_wifi_status():
+    return jsonify({
+        'ssid': wifi_manager.current_ssid(),
+        'signal': wifi_manager.current_signal(),
+        'ip': wifi_manager.current_ip(),
+        'mode': wifi_manager.current_mode(),
+    })
+
+
+@app.route('/api/wifi/connect', methods=['POST'])
+def api_wifi_connect():
+    data = request.get_json(silent=True)
+    if not data or not isinstance(data, dict):
+        return jsonify({'ok': False, 'error': 'Invalid request'}), 400
+    ssid = data.get('ssid', '').strip()
+    password = data.get('password', '').strip()
+    result = wifi_manager.try_connect(ssid, password)
+    return jsonify(result)
 
 
 def main():

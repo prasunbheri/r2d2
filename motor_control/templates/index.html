@@ -187,6 +187,7 @@
     font-size: 1.4rem; background: none; border: none; color: #666;
     cursor: pointer; touch-action: manipulation;
   }
+  .menu-bottom-center { bottom: 4px; left: 50%; transform: translateX(-50%); }
 
   .conn-indicator {
     position: fixed; top: 12px; right: 12px; z-index: 50;
@@ -242,6 +243,46 @@
   .menu-bottom-left { bottom: 4px; left: 4px; }
   .menu-bottom-right { bottom: 4px; right: 4px; }
 
+  .settings-divider {
+    border: none; border-top: 1px solid #2a3a6e; margin: 8px 0;
+  }
+  .wifi-current-status { font-size: 0.75rem; color: #888; margin-bottom: 6px; }
+  .wifi-list { max-height: 120px; overflow-y: auto; margin-bottom: 8px; }
+  .wifi-list::-webkit-scrollbar { width: 4px; }
+  .wifi-list::-webkit-scrollbar-thumb { background: #2a3a6e; border-radius: 2px; }
+  .wifi-net {
+    display: flex; align-items: center; gap: 6px; padding: 4px 6px;
+    cursor: pointer; border-radius: 4px; font-size: 0.75rem;
+    transition: background 0.2s;
+  }
+  .wifi-net:hover { background: #1a1a3e; }
+  .wifi-net.active { background: #1a3a2e; }
+  .wifi-net-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .wifi-net-dot.on { background: #2ecc71; }
+  .wifi-net-dot.off { background: #555; }
+  .wifi-net-ssid { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wifi-bars { font-size: 0.7rem; letter-spacing: 1px; flex-shrink: 0; min-width: 2em; }
+  .wifi-net-sec { font-size: 0.6rem; color: #666; flex-shrink: 0; }
+  .wifi-scan-row { display: flex; gap: 6px; margin-bottom: 6px; }
+  .wifi-btn {
+    background: #2a3a6e; color: #ddd; border: none; border-radius: 6px;
+    padding: 6px 12px; font-size: 0.75rem; cursor: pointer; touch-action: manipulation;
+    transition: background 0.2s;
+  }
+  .wifi-btn:active { background: #3a4a8e; }
+  .wifi-btn:disabled { opacity: 0.5; }
+  .wifi-connect-btn {
+    background: #2ecc71; color: #111; font-weight: 600;
+  }
+  .wifi-connect-btn:active { background: #27ae60; }
+  .wifi-connect-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
+  .wifi-input {
+    flex: 1; background: #1a1a3e; border: 1px solid #2a3a6e; border-radius: 6px;
+    padding: 6px 8px; font-size: 0.75rem; color: #ddd; outline: none;
+  }
+  .wifi-input:focus { border-color: #4a5aae; }
+  .wifi-msg { font-size: 0.7rem; min-height: 1.2em; margin-top: 4px; color: #888; }
+
   .stats-overlay {
     position: fixed; inset: 0; z-index: 200;
     background: rgba(10, 10, 30, 0.5);
@@ -279,6 +320,25 @@
     cursor: pointer; touch-action: manipulation;
   }
   .stats-back:active { background: #1e2d5a; }
+
+  .wifi-overlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(10, 10, 30, 0.5);
+    backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
+    display: none; align-items: center; justify-content: center;
+  }
+  .wifi-overlay.open { display: flex; }
+  .wifi-box {
+    background: #12122a; border: 1px solid #2a3a6e; border-radius: 14px;
+    padding: 24px; width: 280px; max-width: 90vw; max-height: 80vh; overflow-y: auto;
+    position: relative;
+  }
+  .wifi-close {
+    position: absolute; top: 8px; right: 10px;
+    background: none; border: none; color: #666; font-size: 1rem;
+    cursor: pointer; touch-action: manipulation;
+  }
+  .wifi-close:active { color: #e94560; }
 
   /* Landscape: video fills left, right column has joystick + controls below */
   @media (orientation: landscape) and (max-height: 500px) {
@@ -395,6 +455,7 @@
         <span id="shutdown-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg></span>
         <span id="shutdown-count" style="display:none;font-size:15px;font-weight:700"></span>
       </button>
+      <button class="menu-corner-btn menu-bottom-center" id="wifi-settings-btn" onclick="openWifiPanel()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg></button>
       <button class="menu-corner-btn menu-bottom-right" id="stats-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>
     </div>
   </div>
@@ -412,6 +473,23 @@
       <div class="stats-row"><span class="stats-label">RX Rate</span><span class="stats-value" id="s-rx">--</span></div>
       <div class="stats-row"><span class="stats-label">Threads</span><span class="stats-value" id="s-threads">--</span></div>
       <button class="stats-back" id="stats-back">Back to Settings</button>
+    </div>
+  </div>
+
+  <div class="wifi-overlay" id="wifi-overlay">
+    <div class="wifi-box">
+      <button class="wifi-close" id="wifi-close" onclick="closeWifiPanel()">✕</button>
+      <div id="wifi-current-status" class="wifi-current-status" style="margin-bottom:8px"></div>
+      <div class="wifi-scan-row">
+        <button id="wifi-scan-btn" class="wifi-btn" onclick="wifiScan()">Scan</button>
+      </div>
+      <div id="wifi-list" class="wifi-list"></div>
+      <div class="wifi-connect-row">
+        <input id="wifi-ssid-input" class="wifi-input" placeholder="SSID" />
+        <input id="wifi-password-input" class="wifi-input" type="password" placeholder="Password" />
+        <button id="wifi-connect-btn" class="wifi-btn wifi-connect-btn" onclick="wifiConnect()">Connect</button>
+        <div id="wifi-msg" class="wifi-msg"></div>
+      </div>
     </div>
   </div>
 
@@ -926,6 +1004,109 @@ function startCamPoll() {
   }, 3000);
 }
 startCamPoll();
+
+// WiFi functions
+function openWifiPanel() {
+  document.getElementById('wifi-overlay').classList.add('open');
+  wifiScan();
+  wifiStatus();
+}
+
+function closeWifiPanel() {
+  document.getElementById('wifi-overlay').classList.remove('open');
+}
+
+document.getElementById('wifi-overlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeWifiPanel();
+});
+
+async function wifiScan() {
+  const btn = document.getElementById('wifi-scan-btn');
+  btn.disabled = true; btn.textContent = 'Scanning...';
+  const msg = document.getElementById('wifi-msg');
+  msg.textContent = '';
+  try {
+    const r = await fetch('/api/wifi/scan');
+    const d = await r.json();
+    const list = document.getElementById('wifi-list');
+    if (!d.networks || d.networks.length === 0) {
+      list.innerHTML = '<div style="font-size:0.7rem;color:#666">No networks found</div>';
+      return;
+    }
+    let html = '';
+    for (const n of d.networks) {
+      const signal = parseInt(n.signal) || 0;
+      const bars = signal >= 80 ? '\u2588\u2588\u2588' : signal >= 60 ? '\u2588\u2588\u2583' : signal >= 40 ? '\u2588\u2583\u2581' : '\u2583\u2581\u2581';
+      const active = n.ssid === d.current;
+      html += '<div class="wifi-net' + (active ? ' active' : '') + '" data-ssid="' + n.ssid.replace(/"/g, '&quot;') + '" onclick="wifiSelect(this)">' +
+        '<span class="wifi-net-dot ' + (active ? 'on' : 'off') + '"></span>' +
+        '<span class="wifi-net-ssid">' + n.ssid + '</span>' +
+        '<span class="wifi-bars">' + bars + '</span>' +
+        (n.security ? '<span class="wifi-net-sec">' + n.security.replace(/[* ]/g,'').substring(0,4) + '</span>' : '') +
+        '</div>';
+    }
+    list.innerHTML = html;
+  } catch (e) {
+    msg.textContent = 'Scan failed';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Scan';
+  }
+}
+
+function wifiSelect(el) {
+  document.getElementById('wifi-ssid-input').value = el.dataset.ssid;
+  document.getElementById('wifi-password-input').value = '';
+  document.getElementById('wifi-password-input').focus();
+}
+
+async function wifiConnect() {
+  const ssid = document.getElementById('wifi-ssid-input').value.trim();
+  const password = document.getElementById('wifi-password-input').value.trim();
+  if (!ssid) return;
+  const btn = document.getElementById('wifi-connect-btn');
+  btn.disabled = true; btn.textContent = 'Connecting...';
+  const msg = document.getElementById('wifi-msg');
+  msg.textContent = ''; msg.style.color = '#888';
+  try {
+    const r = await fetch('/api/wifi/connect', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ssid, password}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      msg.style.color = '#2ecc71';
+      msg.innerHTML = (
+        '<div style="font-weight:600;font-size:0.85rem;margin-bottom:4px">✅ Connected to <b>' + d.ssid + '</b></div>' +
+        '<div style="font-size:0.8rem">Your device is now on a different network.</div>' +
+        '<div style="font-size:0.8rem;word-break:break-all">Reconnect at <b style="color:#4ec">http://' + (d.ip || '...') + ':5000</b></div>' +
+        '<div style="font-size:0.7rem;margin-top:4px;color:#888">or try <b style="color:#888">http://r2tele.local:5000</b></div>'
+      );
+      wifiScan();
+      wifiStatus();
+    } else {
+      msg.textContent = d.error || 'Failed';
+      msg.style.color = '#e94560';
+    }
+  } catch (e) {
+    msg.textContent = 'Connection failed';
+    msg.style.color = '#e94560';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Connect';
+  }
+}
+
+async function wifiStatus() {
+  try {
+    const r = await fetch('/api/wifi/status');
+    const d = await r.json();
+    document.getElementById('wifi-current-status').textContent =
+      'SSID: ' + (d.ssid || '--') +
+      ' | Signal: ' + (d.signal || '--') + '%' +
+      ' | IP: ' + (d.ip || '--') +
+      (d.mode === 'ap' ? ' | mode: AP' : '');
+  } catch (_) {}
+}
 
 socket.on('status', () => {
   // server echoes not used — client is the authoritative speed source

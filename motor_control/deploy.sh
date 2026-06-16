@@ -14,7 +14,7 @@ echo "Deploying to $PI_HOST:$PI_DIR ..."
 ssh "$PI_HOST" "mkdir -p $PI_DIR/templates $PI_DIR/tests $PI_DIR/static"
 
 # Copy application files
-scp motor_control.py app.py watchdog.py requirements.txt motor_control.sudoers boot_optimize.sh "$PI_HOST:$PI_DIR/"
+scp motor_control.py app.py watchdog.py wifi_manager.py requirements.txt motor_control.sudoers boot_optimize.sh "$PI_HOST:$PI_DIR/"
 scp templates/index.html "$PI_HOST:$PI_DIR/templates/"
 scp static/socket.io.min.js "$PI_HOST:$PI_DIR/static/"
 scp motor_control.service watchdog.service pre-cache.service "$PI_HOST:$PI_DIR/"
