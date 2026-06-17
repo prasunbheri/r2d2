@@ -466,7 +466,10 @@ def video_feed():
             return jsonify({'error': 'too many streams'}), 503
         _active_streams += 1
 
+    _last_stale_log = 0.0
+
     def generate():
+        nonlocal _last_stale_log
         try:
             while True:
                 with _video_owner_lock:
@@ -478,10 +481,15 @@ def video_feed():
                     age = time.time() - latest_frame_time
                     if age < 10.0:
                         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-                    elif latest_frame_time > 0.0:
-                        logger.warning('video_feed: stale frame %.1fs old', age)
+                    else:
+                        if latest_frame_time > 0.0 and age - _last_stale_log > 30:
+                            _last_stale_log = age
+                            logger.warning('video_feed: stale frame %.1fs old', age)
+                        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
                 fps = target_fps
-                if fps is None or fps == 0:
+                if target_fps == 0:
+                    sleep_time = 1.0
+                elif fps is None:
                     sleep_time = 0.1
                 else:
                     sleep_time = 1.0 / fps * 0.8
