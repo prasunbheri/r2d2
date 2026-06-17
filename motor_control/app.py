@@ -48,7 +48,7 @@ _last_frame_time: float = 0.0
 
 RESOLUTIONS: List[Tuple[int, int]] = [(320, 240), (640, 480), (800, 600), (1024, 768), (1280, 960)]
 current_resolution: int = 1  # index into RESOLUTIONS
-target_fps: Any = 9  # desired framerate; None = uncapped
+target_fps: Any = 5  # desired framerate; None = uncapped
 joystick_speed: int = 70  # 0-100
 max_speed_limiter: int = 50  # 0-100
 _fps_controls: Optional[Tuple[int, int]] = None  # (min_dur, max_dur) last applied via set_controls
@@ -89,11 +89,10 @@ def _make_camera_output():
             global latest_frame, latest_frame_time, camera_fps, _last_frame_time
             latest_frame = frame
             latest_frame_time = time.time()
-            now = time.time()
-            dt = now - _last_frame_time
+            dt = latest_frame_time - _last_frame_time
             if dt >= 0.01:
                 camera_fps = 1.0 / dt
-            _last_frame_time = now
+            _last_frame_time = latest_frame_time
 
     return _CircularOutput()
 
@@ -103,7 +102,7 @@ def _start_recording():
     from picamera2.encoders import MJPEGEncoder, Quality
     encoder = MJPEGEncoder()
     output = _make_camera_output()
-    camera.start_recording(encoder, output, quality=Quality.VERY_HIGH)
+    camera.start_recording(encoder, output, quality=Quality.HIGH)
 
 
 def _apply_framerate():
@@ -396,9 +395,11 @@ def api_stats():
             prev['rx_bytes'] = net[iface]['rx_bytes']
             prev['time'] = now
 
+    cpu_count = os.cpu_count() or 1
     data = jsonify({
         'memory': mem,
         'load': load,
+        'cpu_count': cpu_count,
         'temp': temp,
         'tx_rate_kbps': round(tx_rate, 1),
         'rx_rate_kbps': round(rx_rate, 1),
@@ -406,6 +407,8 @@ def api_stats():
         'thread_count': threading.active_count(),
         'resolution': list(RESOLUTIONS[current_resolution]),
         'fps_target': target_fps if target_fps is not None else 'uncapped',
+        'server_time': time.time(),
+        'frame_time': latest_frame_time,
     })
     with _stats_cache_lock:
         _stats_cache = data
@@ -668,7 +671,7 @@ def main():
     logger.info('Motors: %s', ', '.join(MOTOR_NAMES))
     logger.info('Camera initializing in background...')
     logger.info('=' * 40)
-    serve(app, host='0.0.0.0', port=port, threads=8)
+    serve(app, host='0.0.0.0', port=port, threads=4)
 
 
 if __name__ == '__main__':
