@@ -1,6 +1,7 @@
 import atexit
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -45,6 +46,7 @@ latest_frame: Optional[bytes] = None
 latest_frame_time: float = 0.0
 camera_fps: float = 0.0
 _last_frame_time: float = 0.0
+_frame_cond: threading.Condition = threading.Condition()
 
 RESOLUTIONS: List[Tuple[int, int]] = [(320, 240), (640, 480), (800, 600), (1024, 768), (1280, 960)]
 current_resolution: int = 1  # index into RESOLUTIONS
@@ -67,6 +69,26 @@ _mem_cache_time: float = 0.0
 _mem_cache_lock: threading.Lock = threading.Lock()
 
 _template_size: int = 0  # cached size of templates/index.html
+
+_THROTTLED_FLAGS = [
+    (0x1, 'Under-voltage'),
+    (0x2, 'Freq Capped'),
+    (0x4, 'Throttled'),
+    (0x8, 'Soft Temp Limit'),
+]
+
+
+def _parse_throttled() -> dict:
+    try:
+        out = subprocess.run(['vcgencmd', 'get_throttled'], capture_output=True, text=True, timeout=2).stdout.strip()
+        val = int(out.split('=')[1], 0)
+    except Exception:
+        return {'raw': 0, 'flags': []}
+    active = []
+    for bit, label in _THROTTLED_FLAGS:
+        if val & bit:
+            active.append(label)
+    return {'raw': hex(val), 'flags': active}
 
 
 def get_ip() -> str:
@@ -93,6 +115,8 @@ def _make_camera_output():
             if dt >= 0.01:
                 camera_fps = 1.0 / dt
             _last_frame_time = latest_frame_time
+            with _frame_cond:
+                _frame_cond.notify_all()
 
     return _CircularOutput()
 
@@ -375,10 +399,17 @@ def api_stats():
                     net[name] = {'rx_bytes': rx_bytes, 'tx_bytes': tx_bytes}
     except Exception:
         net = {'error': 'unavailable'}
-    try:
-        temp = subprocess.run(['vcgencmd', 'measure_temp'], capture_output=True, text=True, timeout=2).stdout.strip()
-    except Exception:
-        temp = '?'
+    with _stats_lock:
+        now = time.time()
+        if now - _stats_prev.get('temp_time', 0) > 10.0 or 'temp' not in _stats_prev:
+            try:
+                temp = subprocess.run(['vcgencmd', 'measure_temp'], capture_output=True, text=True, timeout=2).stdout.strip()
+            except Exception:
+                temp = '?'
+            _stats_prev['temp'] = temp
+            _stats_prev['temp_time'] = now
+        else:
+            temp = _stats_prev['temp']
 
     now = time.time()
     tx_rate = rx_rate = 0.0
@@ -396,6 +427,36 @@ def api_stats():
             prev['time'] = now
 
     cpu_count = os.cpu_count() or 1
+    try:
+        with open('/proc/uptime') as f:
+            uptime = float(f.read().split()[0])
+    except Exception:
+        uptime = 0
+    try:
+        du = shutil.disk_usage('/')
+        disk_usage = {
+            'total_gb': round(du.total / (1024**3), 1),
+            'used_gb': round(du.used / (1024**3), 1),
+            'free_gb': round(du.free / (1024**3), 1),
+            'percent': round(du.used / du.total * 100, 1),
+        }
+    except Exception:
+        disk_usage = {'total_gb': 0, 'used_gb': 0, 'free_gb': 0, 'percent': 0}
+    with _stats_lock:
+        if now - _stats_prev.get('throttled_time', 0) > 10.0 or 'throttled' not in _stats_prev:
+            throttled = _parse_throttled()
+            try:
+                out = subprocess.run(['vcgencmd', 'measure_clock', 'arm'], capture_output=True, text=True, timeout=2).stdout.strip()
+                cpu_freq = int(out.split('=')[1]) // 1_000_000
+            except Exception:
+                cpu_freq = 0
+            _stats_prev['throttled'] = throttled
+            _stats_prev['cpu_freq'] = cpu_freq
+            _stats_prev['throttled_time'] = now
+        else:
+            throttled = _stats_prev['throttled']
+            cpu_freq = _stats_prev['cpu_freq']
+
     data = jsonify({
         'memory': mem,
         'load': load,
@@ -409,6 +470,10 @@ def api_stats():
         'fps_target': target_fps if target_fps is not None else 'uncapped',
         'server_time': time.time(),
         'frame_time': latest_frame_time,
+        'uptime': uptime,
+        'disk_usage': disk_usage,
+        'cpu_freq': cpu_freq,
+        'throttled': throttled,
     })
     with _stats_cache_lock:
         _stats_cache = data
@@ -486,14 +551,8 @@ def video_feed():
                             _last_stale_log = age
                             logger.warning('video_feed: stale frame %.1fs old', age)
                         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-                fps = target_fps
-                if target_fps == 0:
-                    sleep_time = 1.0
-                elif fps is None:
-                    sleep_time = 0.1
-                else:
-                    sleep_time = 1.0 / fps * 0.8
-                time.sleep(max(0.01, min(1.0, sleep_time)))
+                with _frame_cond:
+                    _frame_cond.wait(timeout=1.0)
         except GeneratorExit:
             pass
         finally:

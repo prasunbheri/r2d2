@@ -539,6 +539,10 @@
       <div class="stats-row"><span class="stats-label">Threads</span><span class="stats-value" id="s-threads">--</span></div>
       <div class="stats-row"><span class="stats-label">Latency</span><span class="stats-value" id="s-latency">--</span></div>
       <div class="stats-row"><span class="stats-label">Frame Delay</span><span class="stats-value" id="s-delay">--</span></div>
+      <div class="stats-row"><span class="stats-label">Uptime</span><span class="stats-value" id="s-uptime">--</span></div>
+      <div class="stats-row"><span class="stats-label">Disk</span><span class="stats-value" id="s-disk">--</span></div>
+      <div class="stats-row"><span class="stats-label">CPU Freq</span><span class="stats-value" id="s-cpufreq">--</span></div>
+      <div class="stats-row"><span class="stats-label">Throttled</span><span class="stats-value" id="s-throttled">--</span></div>
       <button class="stats-back" id="stats-back">Back to Settings</button>
     </div>
   </div>
@@ -1018,6 +1022,13 @@ async function fetchStats() {
     document.getElementById('s-tx').textContent = d.tx_rate_kbps < 1000 ? d.tx_rate_kbps + ' KB/s' : (d.tx_rate_kbps / 1024).toFixed(1) + ' MB/s';
     document.getElementById('s-rx').textContent = d.rx_rate_kbps < 1000 ? d.rx_rate_kbps + ' KB/s' : (d.rx_rate_kbps / 1024).toFixed(1) + ' MB/s';
     document.getElementById('s-threads').textContent = d.thread_count;
+    const days = Math.floor(d.uptime / 86400);
+    const hours = Math.floor((d.uptime % 86400) / 3600);
+    const mins = Math.floor((d.uptime % 3600) / 60);
+    document.getElementById('s-uptime').textContent = (days ? days + 'd ' : '') + hours + 'h ' + mins + 'm';
+    document.getElementById('s-disk').textContent = d.disk_usage.used_gb + ' / ' + d.disk_usage.total_gb + ' GB (' + d.disk_usage.percent + '%)';
+    document.getElementById('s-cpufreq').textContent = d.cpu_freq + ' MHz';
+    document.getElementById('s-throttled').textContent = d.throttled.flags.length ? d.throttled.flags.join(', ') : 'OK';
   } catch (_) {}
 }
 document.getElementById('stats-btn').addEventListener('click', () => {
