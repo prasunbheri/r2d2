@@ -9,6 +9,7 @@ import time
 import socket
 import re
 import logging
+import threading
 from typing import Optional, Dict, List
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,6 @@ KNOWN_CREDS_FILE = os.path.join(CONFIG_DIR, 'wifi_known.json')
 MAX_KNOWN = 5
 AP_SSID = 'r2tele'
 AP_PASSWORD = 'r2tele'
-VERIFY_HOSTS = ['8.8.8.8', '1.1.1.1']
 CONNECT_TIMEOUT = 25
 
 _hotspot_process = None
@@ -40,14 +40,37 @@ def _nmcli(args: list, timeout: int = 15) -> subprocess.CompletedProcess:
 
 
 def _clean_stderr(stderr: str) -> str:
-    """Filter known-harmless nmcli warnings from stderr."""
+    """Filter known-harmless nmcli warnings from stderr, keep real errors."""
     lines = [l for l in stderr.strip().split('\n') if l.strip()]
-    harmless = [
-        'key-mgmt',
-        'Warning: ',
-    ]
-    filtered = [l for l in lines if not any(h in l for h in harmless)]
+    filtered = [l for l in lines if not l.strip().startswith('Warning:')]
     return '\n'.join(filtered) if filtered else ''
+
+
+def _describe_nmcli_failure(result: subprocess.CompletedProcess, ssid: str) -> str:
+    """Return a human-readable error message from a failed nmcli connect."""
+    stderr = _clean_stderr(result.stderr)
+    stdout = (result.stdout or '').strip()
+    combined = (stderr + ' ' + stdout).lower()
+
+    if result.returncode == -1:
+        return 'Connection timed out (network may be out of range)'
+    if 'no network with ssid' in combined:
+        return f'Network "{ssid}" not found (out of range or hidden)'
+    if 'secrets were required' in combined:
+        return 'Wrong password or authentication rejected'
+    if 'access point does not have the expected strength' in combined:
+        return 'Wrong password or connection rejected by access point'
+    if 'invalid' in combined and 'password' in combined:
+        return 'Invalid password format'
+    if 'key-mgmt' in combined or 'property is missing' in combined:
+        return 'Could not detect network security type (try scanning again or check SSID)'
+    if 'could not find a compatible' in combined:
+        return 'Network authentication type not supported'
+    if 'not found' in combined:
+        return f'Network "{ssid}" not found'
+    if stderr:
+        return stderr
+    return 'Connection did not establish (check password or signal strength)'
 
 
 def scan() -> List[Dict]:
@@ -56,13 +79,15 @@ def scan() -> List[Dict]:
     for line in result.stdout.strip().split('\n'):
         if not line.strip():
             continue
-        parts = line.split(':')
+        parts = line.split(':', 2)
         if len(parts) >= 3 and parts[0]:
             networks.append({
                 'ssid': parts[0],
                 'signal': int(parts[1]) if parts[1].isdigit() else 0,
                 'security': parts[2],
             })
+    _ssids = [n['ssid'] for n in networks]
+    logger.info('Scan found %d networks: %s', len(networks), _ssids)
     return networks
 
 
@@ -118,7 +143,7 @@ def _connection_name_for_ssid(ssid: str) -> Optional[str]:
 
 
 def _verify_gateway() -> bool:
-    """Verify WiFi works by pinging the default gateway (router)."""
+    """Verify the default gateway (router) is reachable. Does NOT require internet."""
     try:
         r = subprocess.run(['ip', 'route', 'show', 'default'],
                            capture_output=True, text=True, timeout=5)
@@ -127,16 +152,27 @@ def _verify_gateway() -> bool:
             gateway = m.group(1)
             r = subprocess.run(['ping', '-c', '1', '-W', '5', gateway],
                                capture_output=True, timeout=8)
-            if r.returncode == 0:
-                return True
-        for host in VERIFY_HOSTS:
-            r = subprocess.run(['ping', '-c', '1', '-W', '3', host],
-                               capture_output=True, timeout=5)
-            if r.returncode == 0:
-                return True
+            return r.returncode == 0
     except Exception:
         pass
     return False
+
+
+def _cleanup_connection_profile(ssid: str):
+    """Delete any existing NM connection profile for the SSID to avoid stale config."""
+    result = _nmcli(['-t', 'connection', 'show'], timeout=8)
+    for line in result.stdout.strip().split('\n'):
+        parts = line.split(':')
+        if len(parts) >= 4 and parts[2] == '802-11-wireless':
+            conn_name = parts[0]
+            r = _nmcli(['connection', 'show', conn_name], timeout=8)
+            for cline in r.stdout.split('\n'):
+                if cline.strip().startswith('802-11-wireless.ssid:') and \
+                   cline.split(':', 1)[1].strip() == ssid:
+                    logger.info('Deleting stale connection profile %s for SSID %s', conn_name, ssid)
+                    subprocess.run(['sudo', 'nmcli', 'connection', 'delete', conn_name],
+                                   capture_output=True, timeout=10)
+                    return
 
 
 def save_credentials(ssid: str, password: str):
@@ -168,7 +204,7 @@ def try_connect(ssid: str, password: str, verify: bool = True) -> Dict:
     if not ssid or not ssid.strip():
         return {'ok': False, 'error': 'SSID is required'}
     ssid = ssid.strip()
-    if not password or password.strip() == '':
+    if not password or (password or '').strip() == '':
         return {'ok': False, 'error': 'Password is required'}
     if len(password) < 8:
         return {'ok': False, 'error': 'Password must be at least 8 characters'}
@@ -179,31 +215,54 @@ def try_connect(ssid: str, password: str, verify: bool = True) -> Dict:
 
     logger.info('Connecting to %s (current: %s)', ssid, prev_ssid or 'none')
 
+    _cleanup_connection_profile(ssid)
+    stop_ap()
+
+    # Pre-scan so nmcli has the SSID in its cache before connecting
+    logger.info('Pre-scanning for %s...', ssid)
+    scan()
+    time.sleep(1)
+
     connect_result = _nmcli([
         'device', 'wifi', 'connect', ssid,
-        'password', password
+        'password', password,
+        'ifname', 'wlan0',
     ], timeout=CONNECT_TIMEOUT)
 
-    time.sleep(3)
+    logger.info('nmcli connect rc=%d stderr=%s stdout=%s',
+                connect_result.returncode,
+                connect_result.stderr.strip() or '(none)',
+                connect_result.stdout.strip() or '(none)')
 
-    connected_ssid = current_ssid()
-    if connected_ssid == ssid:
-        if verify:
-            logger.info('Verifying connectivity via %s...', ssid)
-            if _verify_gateway():
-                logger.info('Verified connectivity on %s', ssid)
-                save_credentials(ssid, password)
-                return {'ok': True, 'ssid': ssid, 'ip': current_ip() or ''}
-            else:
-                logger.warning('Gateway check failed on %s, reverting', ssid)
-                return _revert_or_ap(prev_conn_name, known, ssid,
-                                     'Gateway not reachable (wrong password or no internet)')
-        save_credentials(ssid, password)
-        return {'ok': True, 'ssid': ssid, 'ip': current_ip() or ''}
+    # Poll for SSID to become active (DHCP may take time)
+    connected_ssid = None
+    for attempt in range(10):
+        time.sleep(1.5)
+        connected_ssid = current_ssid()
+        if connected_ssid == ssid:
+            logger.info('SSID %s confirmed active after %ds', ssid, (attempt + 1) * 1.5)
+            break
+    else:
+        logger.warning('SSID %s never became active after connect (last seen: %s)',
+                       ssid, connected_ssid or 'none')
 
-    err = _clean_stderr(connect_result.stderr) or 'Connection did not establish'
-    logger.warning('Did not connect to %s (currently on %s): %s', ssid, connected_ssid or 'none', err)
-    return _revert_or_ap(prev_conn_name, known, None, err)
+    if connected_ssid != ssid:
+        err = _describe_nmcli_failure(connect_result, ssid)
+        logger.warning('Did not connect to %s (currently on %s): %s',
+                       ssid, connected_ssid or 'none', err)
+        return _revert_or_ap(prev_conn_name, known, None, err)
+
+    # SSID connected successfully
+    if verify and prev_ssid and prev_ssid != ssid:
+        logger.info('Verifying gateway on new network %s...', ssid)
+        if _verify_gateway():
+            logger.info('Gateway reachable on %s', ssid)
+        else:
+            logger.warning('Gateway not reachable on %s, but connection accepted', ssid)
+
+    save_credentials(ssid, password)
+    ip = current_ip() or ''
+    return {'ok': True, 'ssid': ssid, 'ip': ip}
 
 
 def _revert_or_ap(prev_conn: Optional[str], known: List[Dict],
@@ -242,39 +301,48 @@ def _revert_or_ap(prev_conn: Optional[str], known: List[Dict],
 
 def start_ap() -> Optional[Dict]:
     global _hotspot_process
-    stop_ap()
+    with _hotspot_lock:
+        stop_ap()
 
-    pwd = AP_PASSWORD
-    ssid = AP_SSID
+        pwd = AP_PASSWORD
+        ssid = AP_SSID
 
-    try:
-        _hotspot_process = subprocess.Popen([
-            'sudo', 'nmcli', 'device', 'wifi', 'hotspot',
-            'ifname', 'wlan0', 'ssid', ssid, 'password', pwd
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            proc = subprocess.Popen([
+                'sudo', 'nmcli', 'device', 'wifi', 'hotspot',
+                'ifname', 'wlan0', 'ssid', ssid, 'password', pwd
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        time.sleep(5)
-        ip = current_ip()
+            time.sleep(5)
+            if proc.poll() is not None and proc.returncode != 0:
+                logger.error('AP start failed: nmcli exited with code %d', proc.returncode)
+                _hotspot_process = None
+                return None
 
-        logger.info('AP mode: SSID=%s IP=%s', ssid, ip or 'unknown')
-        return {'ap_ssid': ssid, 'ap_password': pwd, 'ap_ip': ip or '10.42.0.1'}
-    except Exception as e:
-        logger.error('AP start failed: %s', e)
-        return None
+            _hotspot_process = proc
+            ip = current_ip()
+
+            logger.info('AP mode: SSID=%s IP=%s', ssid, ip or 'unknown')
+            return {'ap_ssid': ssid, 'ap_password': pwd, 'ap_ip': ip or '10.42.0.1'}
+        except Exception as e:
+            _hotspot_process = None
+            logger.error('AP start failed: %s', e)
+            return None
 
 
 def stop_ap():
     global _hotspot_process
-    if _hotspot_process:
-        try:
-            _hotspot_process.terminate()
-            _hotspot_process.wait(timeout=5)
-        except Exception:
+    with _hotspot_lock:
+        if _hotspot_process:
             try:
-                _hotspot_process.kill()
+                _hotspot_process.terminate()
+                _hotspot_process.wait(timeout=5)
             except Exception:
-                pass
-        _hotspot_process = None
+                try:
+                    _hotspot_process.kill()
+                except Exception:
+                    pass
+            _hotspot_process = None
     for cmd in [
         ['sudo', 'nmcli', 'connection', 'down', 'Hotspot'],
         ['sudo', 'nmcli', 'connection', 'delete', 'Hotspot'],
@@ -287,7 +355,9 @@ def stop_ap():
 
 def current_mode() -> str:
     """Return 'station', 'ap', or 'none'."""
-    if _hotspot_process and _hotspot_process.poll() is None:
+    with _hotspot_lock:
+        hp = _hotspot_process
+    if hp and hp.poll() is None:
         return 'ap'
     ssid = current_ssid()
     return 'station' if ssid else 'none'

@@ -32,10 +32,12 @@ A web-controlled 4-motor differential drive system for a Raspberry Pi Zero W, fe
   - [Web Server](#2-web-server-apppy)
   - [Watchdog](#3-watchdog-watchdogpy)
   - [WiFi Manager](#4-wifi-manager-wifi_managerpy)
-  - [Dashboard](#5-web-dashboard-templatesindexhtml)
+  - [Battery Monitor](#5-battery-monitor-batterypy)
+  - [Dashboard](#6-web-dashboard-templatesindexhtml)
 - [API Reference](#api-reference)
   - [HTTP Endpoints](#http-endpoints)
   - [SocketIO Events](#socketio-events)
+- [Battery Monitoring](#battery-monitoring)
 - [LED Status Patterns](#led-status-patterns)
 - [Testing](#testing)
 - [Configuration Reference](#configuration-reference)
@@ -163,6 +165,17 @@ All motor control pins use the **physical pins 31–40** block (BCM numbering), 
 | 39 | — | GND | Ground | Common ground |
 
 **Status LED**: BCM GPIO 5 (driven by watchdog via sysfs)
+
+**I2C Bus (ADS1115 ADC):**
+
+| Physical Pin | BCM GPIO | Function | Connected To |
+|---|---|---|---|
+| 3 | 2 | SDA | ADS1115 — SDA |
+| 5 | 3 | SCL | ADS1115 — SCL |
+| 1 | — | 3.3V | ADS1115 — VDD |
+| 6 | — | GND | ADS1115 — GND |
+
+> **Note:** The ADS1115 is on I2C-1 at address `0x48`. Use `sudo i2cdetect -y 1` to verify.
 
 > **Note:** Pins 31–40 are chosen to avoid audio output conflict on GPIO 12/13 which have alt-function for PWM0/PWM1. Since `pigpio` uses its own DMA-based PWM, this is not an issue, but the physical block is convenient for wiring.
 
@@ -514,7 +527,40 @@ _revert_or_ap()
 
 **AP Mode:** As a last resort, the Pi creates its own hotspot at `10.42.0.1:5000`. Connect to SSID `r2tele` (password `r2tele`) and navigate to that IP.
 
-### 5. Web Dashboard (`templates/index.html`)
+### 5. Battery Monitor (`battery.py`)
+
+Background thread that reads the **ADS1115** ADC over I2C every 5 seconds. Runs independently from the motor controller — failure does not affect driving.
+
+```
+BatteryMonitor
+│
+├── __init__()
+│   ├── Open SMBus on /dev/i2c-1
+│   ├── Write config register: AIN0 vs GND, ±6.144 V, continuous mode, 860 SPS
+│   └── Set self._available = True (or False on failure)
+│
+├── read()
+│   ├── Read 2 bytes from conversion register
+│   ├── Convert raw ADC value to voltage: V_adc = raw × 6.144 / 32768
+│   ├── Apply divider ratio: V_bat = V_adc × (R1 + R2) / R2
+│   ├── Compute percentage from LiFePO₄ 4S curve
+│   └── Update self._voltage / self._percentage
+│
+├── run_loop()
+│   ├── Every 5s (while available): call read()
+│   └── Every 30s (if unavailable): try_reconnect()
+│
+└── get_data()
+    └── Return {"voltage": float, "percentage": float, "available": bool}
+```
+
+**ADS1115 Configuration:**
+
+| Register | Value | Meaning |
+|---|---|---|
+| Config (0x01) | `0xC063` | OS=1, MUX=100 (AIN0-GND), PGA=000 (±6.144V), MODE=0 (continuous), DR=011 (860 SPS), comparator disabled |
+
+### 6. Web Dashboard (`templates/index.html`)
 
 Single-page application with dark theme, mobile-first responsive design, and offline-first architecture.
 
@@ -522,7 +568,7 @@ Single-page application with dark theme, mobile-first responsive design, and off
 
 | Component | Description |
 |---|---|
-| **Connection Indicator** | Green/red dot + "online"/"offline" label at top-right |
+| **Connection Indicator** | Green/red dot + "online"/"offline" label + battery voltage/percentage at top-right |
 | **Camera Feed** | MJPEG stream via `<img src="/video_feed">` with FPS counter overlay |
 | **Virtual Joystick** | 200×200px circular base with 64px knob, mouse + touch support, cardinal direction labels |
 | **Auto-Center Toggle** | CSS switch: when on, joystick snaps to zero on release; when off, holds last position |
@@ -569,9 +615,19 @@ index.html JS
 │   ├── Slider 0–4 → POST /api/set_resolution (async)
 │   └── Cache-busting via Date.now() query param
 │
+├── Battery Display
+│   ├── Polls /api/battery every 5s
+│   ├── Shows voltage + percentage next to connection indicator
+│   └── Color-coded percentage: green (>50%), yellow (>20%), red (≤20%)
+│
 ├── Stats Overlay
 │   ├── ℹ button opens overlay polling /api/stats every 5s
-│   └── Shows memory, load, net TX/RX, uptime, temperature
+│   └── Shows memory, load, net TX/RX, uptime, temperature, battery
+│
+├── Performance Chart
+│   ├── Charts tab with 60s / 10m spans
+│   ├── Plots CPU, Temp, FPS, Delay, and Battery percentage
+│   └── Toggle series on/off via legend
 │
 └── Shutdown Logic
     ├── mousedown/mousedown → start 5s countdown
@@ -618,6 +674,7 @@ Each animation frame moves the knob `per_frame_speed` pixels toward the target, 
 | `/api/debug` | GET | Debug information | — | `{"thread_count": int, "camera_available": bool, ...}` |
 | `/api/wifi/scan` | GET | Scan nearby WiFi networks | — | `{"networks": [...], "current": "SSID"}` |
 | `/api/wifi/status` | GET | Current WiFi connection info | — | `{"ssid": "...", "signal": 80, "ip": "...", "mode": "station"}` |
+| `/api/battery` | GET | Battery voltage and percentage | — | `{"voltage": 12.64, "percentage": 67.3, "available": true}` |
 | `/api/wifi/connect` | POST | Connect to a WiFi network | `{"ssid": "...", "password": "..."}` | `{"ok": true, "ssid": "...", "ip": "..."}` |
 
 **Resolution Index Mapping:**
@@ -647,6 +704,51 @@ Each animation frame moves the knob `per_frame_speed` pixels toward the target, 
 |---|---|---|
 | `status` | `{"speeds": {"FL": 50, ...}}` | Current motor speeds (confirming update) |
 | `camera_status` | `{"available": true}` | Camera availability status |
+
+---
+
+## Battery Monitoring
+
+The system monitors battery voltage using an **ADS1115 16-bit ADC** over I2C. The ADC reads the battery voltage through a resistive voltage divider and reports both raw voltage and estimated percentage on the dashboard.
+
+### Hardware
+
+| Component | Connection |
+|---|---|
+| **ADS1115** | I2C-1 (SDA=GPIO2, SCL=GPIO3), powered from Pi 3.3V |
+| **I2C address** | `0x48` (ADDR pin to GND) |
+| **Voltage divider** | **33kΩ** (battery+ to A0) + **10kΩ** (A0 to GND) |
+| **Divider ratio** | V_bat = V_A0 × (33k + 10k) / 10k = V_A0 × **4.3** |
+
+> **Resistor selection:** The 33k+10k divider keeps A0 ≤ 3.35V at full charge (14.4V), safely below the ADS1115 absolute max of 3.6V. Do not use 22k+10k — that gives 4.5V on A0 at full charge, exceeding the rating.
+
+### Voltage Reference (4S LiFePO₄)
+
+| State | Per Cell | Pack Total |
+|---|---|---|
+| Fully charged | 3.60 V | 14.40 V |
+| Nominal | 3.20 V | 12.80 V |
+| Discharged (cutoff) | 2.50 V | 10.00 V |
+
+Percentage is linearly interpolated between 10.0 V (0%) and 14.4 V (100%).
+
+### Software
+
+- **`battery.py`** — `BatteryMonitor` class configures the ADS1115 for continuous conversion on AIN0 vs GND at ±6.144 V range, 860 SPS. Polls every 5 seconds in a background thread.
+- **`/api/battery`** — Returns `{"voltage": 12.64, "percentage": 67.3, "available": true}`
+- **Dashboard** — Battery voltage and percentage shown next to the connection indicator (top-right), in the Stats overlay, and as a plottable metric in the Performance chart.
+
+### Configuration
+
+In `battery.py`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DIVIDER_TOP` | 33_000 | Top resistor in Ω |
+| `DIVIDER_BOTTOM` | 10_000 | Bottom resistor in Ω |
+| `CELLS` | 4 | Number of series cells |
+| `V_FULL` | 3.6 × CELLS | Full charge voltage per cell |
+| `V_EMPTY` | 2.5 × CELLS | Cutoff voltage per cell |
 
 ---
 
@@ -900,6 +1002,21 @@ Connect the Pi Camera ribbon cable to the CSI port on the Pi Zero W (latch side 
 
 Use a 12V → 5V buck converter from the battery to power the Pi via GPIO pins 2 (5V) and 6 (GND), or through the micro-USB port.
 
+### Step 8: Battery Voltage Monitoring (Optional)
+
+Connect an **ADS1115** ADC to monitor the battery:
+
+```
+ADS1115 ───┬── VDD ──► Pi pin 1 (3.3V)
+           ├── GND ──► Pi pin 6 (GND)
+           ├── SDA ──► Pi pin 3 (GPIO 2 / SDA)
+           ├── SCL ──► Pi pin 5 (GPIO 3 / SCL)
+           └── A0 ───┬── 33kΩ ──► Battery (+)
+                     └── 10kΩ ──► GND
+```
+
+> **IMPORTANT:** Use a **33kΩ** resistor from battery+ to A0 (with 10kΩ to GND). Do NOT use 22kΩ — it will exceed the ADS1115's maximum input voltage at full charge.
+
 ---
 
 ## Project Structure
@@ -913,7 +1030,7 @@ r2d2/
 │
 ├── motor_control/
 │   ├── app.py                     # Flask + SocketIO web server, camera management
-│   ├── motor_control.py           # 4-motor pigpio abstraction
+│   ├── battery.py                 # ADS1115 ADC → battery voltage monitor
 │   ├── watchdog.py                # sysfs GPIO service monitor + LED patterns
 │   ├── wifi_manager.py            # WiFi scanning, connection, AP fallback
 │   ├── wifi_known.json            # Runtime — last 5 trusted SSID/password pairs

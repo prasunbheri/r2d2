@@ -8,12 +8,14 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, render_template, Response, request, stream_with_context
 from flask_socketio import SocketIO, emit
 from waitress import serve
 
+from battery import BatteryMonitor
 from motor_control import MotorController, MOTOR_NAMES
 import wifi_manager
 
@@ -37,6 +39,7 @@ app.config['SECRET_KEY'] = os.urandom(24).hex()
 sio = SocketIO(app, cors_allowed_origins='*', async_mode='threading', transports=['polling'])
 
 controller: Optional[MotorController] = None
+battery_monitor: Optional[BatteryMonitor] = None
 
 camera: Any = None
 camera_lock: threading.Lock = threading.Lock()
@@ -47,6 +50,8 @@ latest_frame_time: float = 0.0
 camera_fps: float = 0.0
 _last_frame_time: float = 0.0
 _frame_cond: threading.Condition = threading.Condition()
+_frame_lock: threading.Lock = threading.Lock()
+_camera_retry_lock: threading.Lock = threading.Lock()
 
 RESOLUTIONS: List[Tuple[int, int]] = [(320, 240), (640, 480), (800, 600), (1024, 768), (1280, 960)]
 current_resolution: int = 1  # index into RESOLUTIONS
@@ -93,11 +98,9 @@ def _parse_throttled() -> dict:
 
 def get_ip() -> str:
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('10.255.255.255', 1))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(('10.255.255.255', 1))
+            return s.getsockname()[0]
     except Exception:
         return '127.0.0.1'
 
@@ -109,12 +112,14 @@ def _make_camera_output():
     class _CircularOutput(Output):
         def outputframe(self, frame, keyframe=True, timestamp=None, packet=None, audio=False):
             global latest_frame, latest_frame_time, camera_fps, _last_frame_time
-            latest_frame = frame
-            latest_frame_time = time.time()
-            dt = latest_frame_time - _last_frame_time
-            if dt >= 0.01:
-                camera_fps = 1.0 / dt
-            _last_frame_time = latest_frame_time
+            now = time.time()
+            with _frame_lock:
+                latest_frame = frame
+                latest_frame_time = now
+                dt = now - _last_frame_time
+                if dt >= 0.01:
+                    camera_fps = 1.0 / dt
+                _last_frame_time = now
             with _frame_cond:
                 _frame_cond.notify_all()
 
@@ -148,7 +153,7 @@ def _apply_framerate():
 
 
 def _start_camera():
-    global camera, camera_available, latest_frame
+    global camera, camera_available, latest_frame, latest_frame_time
     with camera_lock:
         if camera_available:
             return
@@ -165,8 +170,9 @@ def _start_camera():
             if target_fps != 0:
                 _apply_framerate()
             camera_available = True
-            latest_frame = None
-            latest_frame_time = 0.0
+            with _frame_lock:
+                latest_frame = None
+                latest_frame_time = 0.0
             sio.emit('camera_status', {'available': True})
             logger.info('Camera online %dx%d HW MJPEG', w, h)
         except Exception as e:
@@ -189,7 +195,7 @@ def _start_camera():
 
 
 def _stop_camera():
-    global camera, camera_available, latest_frame, camera_fps, _last_frame_time
+    global camera, camera_available, latest_frame, latest_frame_time, camera_fps, _last_frame_time
     with camera_lock:
         if not camera_available or camera is None:
             return
@@ -207,10 +213,11 @@ def _stop_camera():
             pass
         camera = None
         camera_available = False
-        latest_frame = None
-        latest_frame_time = 0.0
-        camera_fps = 0.0
-        _last_frame_time = 0.0
+        with _frame_lock:
+            latest_frame = None
+            latest_frame_time = 0.0
+            camera_fps = 0.0
+            _last_frame_time = 0.0
         sio.emit('camera_status', {'available': False})
         logger.info('Camera stopped')
 
@@ -221,7 +228,8 @@ def init_camera():
 
 @app.route('/api/camera_status')
 def api_camera_status():
-    return jsonify({'available': camera_available, 'fps': camera_fps})
+    with camera_lock:
+        return jsonify({'available': camera_available, 'fps': camera_fps})
 
 @app.route('/api/set_resolution', methods=['POST'])
 def api_set_resolution():
@@ -229,7 +237,9 @@ def api_set_resolution():
     res_idx = request.json.get('index', 1)
     if not isinstance(res_idx, int) or res_idx < 0 or res_idx >= len(RESOLUTIONS):
         return jsonify({'ok': False, 'error': 'invalid index'}), 400
-    if not camera_available:
+    with camera_lock:
+        cam_avail = camera_available
+    if not cam_avail:
         return jsonify({'ok': False, 'error': 'camera unavailable'}), 503
     w, h = RESOLUTIONS[res_idx]
     th = threading.Thread(target=_reconfigure_camera, args=(res_idx, w, h), daemon=True)
@@ -239,8 +249,12 @@ def api_set_resolution():
 
 
 def _reconfigure_camera(res_idx, w, h):
-    global current_resolution, latest_frame, camera_available, camera
+    global current_resolution, latest_frame, latest_frame_time, camera_available, camera
     with camera_lock:
+        if camera is None:
+            logger.warning('Camera went away before reconfigure')
+            camera_available = False
+            return
         try:
             camera.stop_recording()
             camera.stop()
@@ -253,8 +267,9 @@ def _reconfigure_camera(res_idx, w, h):
             _start_recording()
             _apply_framerate()
             current_resolution = res_idx
-            latest_frame = None
-            latest_frame_time = 0.0
+            with _frame_lock:
+                latest_frame = None
+                latest_frame_time = 0.0
             logger.info('Camera reconfigured to %dx%d HW MJPEG', w, h)
         except Exception as e:
             logger.error('Camera reconfigure to %dx%d failed: %s', w, h, e)
@@ -317,6 +332,10 @@ def api_settings():
 
 @app.route('/api/shutdown', methods=['POST'])
 def api_shutdown():
+    origin = request.headers.get('Origin', '') or request.headers.get('Referer', '')
+    if not any(h in origin for h in ['r2tele.local', '10.42.0.1', '192.168.', 'localhost', '127.0.0.1']):
+        logger.warning('Shutdown rejected: invalid origin %s', origin)
+        return jsonify({'ok': False, 'error': 'forbidden'}), 403
     if controller is None:
         return jsonify({'ok': False, 'error': 'controller not initialized'}), 503
     controller.stop_all()
@@ -334,23 +353,40 @@ def api_health():
     return jsonify({'ok': True})
 
 
+@app.route('/api/battery')
+def api_battery():
+    global battery_monitor
+    if battery_monitor is None:
+        return jsonify({'voltage': 0, 'percentage': 0, 'available': False})
+    return jsonify(battery_monitor.get_data())
+
+
 @app.route('/api/debug')
 def api_debug():
+    with camera_lock:
+        cam_avail = camera_available
+        cam_fps = camera_fps
+        res = current_resolution
     return jsonify({
         'root_path': app.root_path,
         'template_folder': app.template_folder,
         'thread_count': threading.active_count(),
-        'camera_available': camera_available,
-        'camera_fps': camera_fps,
-        'camera_resolution': RESOLUTIONS[current_resolution],
+        'camera_available': cam_avail,
+        'camera_fps': cam_fps,
+        'camera_resolution': RESOLUTIONS[res],
         'file_size': _template_size,
     })
 
 _stats_prev = {'tx_bytes': None, 'rx_bytes': None, 'time': 0.0}
 _stats_lock = threading.Lock()
+_api_net_prev = {'tx_bytes': None, 'rx_bytes': None, 'time': 0.0}
+_api_net_lock = threading.Lock()
 _stats_cache = None
 _stats_cache_lock = threading.Lock()
 _stats_cache_time = 0.0
+
+_stats_history: deque = deque(maxlen=300)
+_stats_history_lock: threading.Lock = threading.Lock()
 
 def _read_meminfo():
     global _mem_cache, _mem_cache_time
@@ -372,22 +408,24 @@ def _read_meminfo():
         _mem_cache_time = now
         return _mem_cache
 
-@app.route('/api/stats')
-def api_stats():
-    global _stats_cache, _stats_cache_time
-    with _stats_cache_lock:
-        now = time.time()
-        if now - _stats_cache_time < 0.5 and _stats_cache is not None:
-            return _stats_cache
-    load = []
-    net = {}
-    temp = ''
+def _collect_stats_data(net_prev=None, net_lock=None):
+    """Collect all stats metrics and return as dict."""
+    if net_prev is None:
+        net_prev = _stats_prev
+        net_lock = _stats_lock
+    now = time.time()
+    cpu_count = os.cpu_count() or 1
+
     mem = _read_meminfo()
+
+    load = []
     try:
         with open('/proc/loadavg') as f:
             load = f.read().strip().split()[:3]
     except Exception:
         load = ['?', '?', '?']
+
+    net = {}
     try:
         with open('/proc/net/dev') as f:
             for line in f:
@@ -399,11 +437,13 @@ def api_stats():
                     net[name] = {'rx_bytes': rx_bytes, 'tx_bytes': tx_bytes}
     except Exception:
         net = {'error': 'unavailable'}
+
+    temp = ''
     with _stats_lock:
-        now = time.time()
         if now - _stats_prev.get('temp_time', 0) > 10.0 or 'temp' not in _stats_prev:
             try:
-                temp = subprocess.run(['vcgencmd', 'measure_temp'], capture_output=True, text=True, timeout=2).stdout.strip()
+                raw = subprocess.run(['vcgencmd', 'measure_temp'], capture_output=True, text=True, timeout=2).stdout.strip()
+                temp = raw.replace('temp=', '').replace("'C", '').strip()
             except Exception:
                 temp = '?'
             _stats_prev['temp'] = temp
@@ -411,27 +451,28 @@ def api_stats():
         else:
             temp = _stats_prev['temp']
 
-    now = time.time()
     tx_rate = rx_rate = 0.0
     iface = next((k for k in net if k.startswith('wlan')), None)
-    with _stats_lock:
-        prev = _stats_prev
-        if iface and prev['tx_bytes'] is not None:
-            dt = now - prev['time']
+    with net_lock:
+        if iface and net_prev.get('tx_bytes') is not None:
+            dt = now - net_prev.get('time', now)
             if dt >= 1.0:
-                tx_rate = (net[iface]['tx_bytes'] - prev['tx_bytes']) / dt / 1024
-                rx_rate = (net[iface]['rx_bytes'] - prev['rx_bytes']) / dt / 1024
-        if iface:
-            prev['tx_bytes'] = net[iface]['tx_bytes']
-            prev['rx_bytes'] = net[iface]['rx_bytes']
-            prev['time'] = now
+                tx_rate = (net[iface]['tx_bytes'] - net_prev['tx_bytes']) / dt / 1024
+                rx_rate = (net[iface]['rx_bytes'] - net_prev['rx_bytes']) / dt / 1024
+                net_prev['tx_bytes'] = net[iface]['tx_bytes']
+                net_prev['rx_bytes'] = net[iface]['rx_bytes']
+                net_prev['time'] = now
+        elif iface and net_prev.get('tx_bytes') is None:
+            net_prev['tx_bytes'] = net[iface]['tx_bytes']
+            net_prev['rx_bytes'] = net[iface]['rx_bytes']
+            net_prev['time'] = now
 
-    cpu_count = os.cpu_count() or 1
     try:
         with open('/proc/uptime') as f:
             uptime = float(f.read().split()[0])
     except Exception:
         uptime = 0
+
     try:
         du = shutil.disk_usage('/')
         disk_usage = {
@@ -442,6 +483,7 @@ def api_stats():
         }
     except Exception:
         disk_usage = {'total_gb': 0, 'used_gb': 0, 'free_gb': 0, 'percent': 0}
+
     with _stats_lock:
         if now - _stats_prev.get('throttled_time', 0) > 10.0 or 'throttled' not in _stats_prev:
             throttled = _parse_throttled()
@@ -457,28 +499,109 @@ def api_stats():
             throttled = _stats_prev['throttled']
             cpu_freq = _stats_prev['cpu_freq']
 
-    data = jsonify({
+    with camera_lock:
+        cam_fps = camera_fps
+        cam_avail = camera_available
+        cur_res = current_resolution
+    return {
+        'time': now,
         'memory': mem,
         'load': load,
         'cpu_count': cpu_count,
         'temp': temp,
         'tx_rate_kbps': round(tx_rate, 1),
         'rx_rate_kbps': round(rx_rate, 1),
-        'fps': round(camera_fps, 1) if camera_available else 0,
+        'fps': round(cam_fps, 1) if cam_avail else 0,
         'thread_count': threading.active_count(),
-        'resolution': list(RESOLUTIONS[current_resolution]),
+        'resolution': list(RESOLUTIONS[cur_res]),
         'fps_target': target_fps if target_fps is not None else 'uncapped',
-        'server_time': time.time(),
-        'frame_time': latest_frame_time,
         'uptime': uptime,
         'disk_usage': disk_usage,
         'cpu_freq': cpu_freq,
         'throttled': throttled,
-    })
+    }
+
+
+@app.route('/api/stats')
+def api_stats():
+    global _stats_cache, _stats_cache_time
     with _stats_cache_lock:
-        _stats_cache = data
+        now = time.time()
+        if now - _stats_cache_time < 0.5 and _stats_cache is not None:
+            return _stats_cache
+
+    data = _collect_stats_data(net_prev=_api_net_prev, net_lock=_api_net_lock)
+    data['server_time'] = time.time()
+    with _frame_lock:
+        data['frame_time'] = latest_frame_time
+
+    result = jsonify(data)
+    with _stats_cache_lock:
+        _stats_cache = result
         _stats_cache_time = time.time()
-    return data
+    return result
+
+
+def _stats_collector():
+    """Background thread: sample stats every 2s into ring buffer."""
+    while True:
+        time.sleep(2)
+        try:
+            data = _collect_stats_data()
+            now = data['time']
+            cpu_pct = round(float(data['load'][0]) / data['cpu_count'] * 100, 1) if data['load'][0] != '?' else 0
+            temp_str = data['temp']
+            try:
+                temp_c = float(temp_str) if temp_str != '?' else 0
+            except (ValueError, TypeError):
+                temp_c = 0
+            with _frame_lock:
+                ft = latest_frame_time
+            delay = max(0, (now - ft) * 1000) if ft > 0 else 0
+            mem = data['memory']
+            mem_total = mem_avail = 0
+            if isinstance(mem, dict) and 'MemTotal' in mem and 'MemAvailable' in mem:
+                try:
+                    mem_total = int(mem['MemTotal'].split()[0])
+                    mem_avail = int(mem['MemAvailable'].split()[0])
+                except (ValueError, IndexError):
+                    pass
+            mem_pct = round((mem_total - mem_avail) / mem_total * 100, 1) if mem_total > 0 else 0
+            bat_voltage = 0.0
+            global battery_monitor
+            if battery_monitor is not None:
+                bat_data = battery_monitor.get_data()
+                if bat_data['available']:
+                    bat_voltage = bat_data['percentage']
+            sample = {
+                't': now,
+                'cpu': cpu_pct,
+                'temp': temp_c,
+                'fps': data['fps'],
+                'delay': round(delay, 0),
+                'mem': mem_pct,
+                'tx': data['tx_rate_kbps'],
+                'rx': data['rx_rate_kbps'],
+                'freq': data['cpu_freq'],
+                'throttled': data['throttled']['flags'],
+                'bat': bat_voltage,
+            }
+            with _stats_history_lock:
+                _stats_history.append(sample)
+        except Exception:
+            logger.exception('Stats collector error')
+
+
+@app.route('/api/stats/history')
+def api_stats_history():
+    span = request.args.get('span', '60s')
+    if span not in ('60s', '10m'):
+        span = '60s'
+    with _stats_history_lock:
+        samples = list(_stats_history)
+    if span == '60s':
+        samples = samples[-30:]
+    return jsonify({'samples': samples, 'span': span})
 
 
 @app.before_request
@@ -499,17 +622,22 @@ def heartbeat_log():
             age = time.time() - controller.last_cmd_time
             if age > 2:
                 stale = ' STALE'
-        if not camera_available and target_fps != 0:
+        with camera_lock:
+            cam_avail = camera_available
+            cam_fps = camera_fps
+        if not cam_avail and target_fps != 0:
             global _camera_retry_in_flight
-            if _camera_retry_in_flight:
-                logger.info('Camera retry already in progress, skipping')
-            else:
-                _camera_retry_in_flight = True
+            should_retry = False
+            with _camera_retry_lock:
+                if not _camera_retry_in_flight:
+                    _camera_retry_in_flight = True
+                    should_retry = True
+            if should_retry:
                 logger.info('Camera unavailable, retrying init...')
                 th = threading.Thread(target=init_camera_async, daemon=True)
                 th.start()
         logger.info('heartbeat threads=%d cam=%s fps=%.1f motors=%s%s',
-                     threading.active_count(), camera_available, camera_fps,
+                     threading.active_count(), cam_avail, cam_fps,
                      non_zero, stale)
 
 @app.route('/')
@@ -541,13 +669,15 @@ def video_feed():
                     still_owner = _video_owner_sid == sid
                 if not still_owner:
                     break
-                frame = latest_frame
+                with _frame_lock:
+                    frame = latest_frame
+                    ftime = latest_frame_time
                 if frame is not None:
-                    age = time.time() - latest_frame_time
+                    age = time.time() - ftime
                     if age < 10.0:
                         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
                     else:
-                        if latest_frame_time > 0.0 and age - _last_stale_log > 30:
+                        if ftime > 0.0 and age - _last_stale_log > 30:
                             _last_stale_log = age
                             logger.warning('video_feed: stale frame %.1fs old', age)
                         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
@@ -558,7 +688,8 @@ def video_feed():
         finally:
             with _streams_lock:
                 global _active_streams
-                _active_streams -= 1
+                if _active_streams > 0:
+                    _active_streams -= 1
 
     return Response(stream_with_context(generate()),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
@@ -570,7 +701,8 @@ def on_connect():
         emit('video_owner', {'sid': _video_owner_sid})
     if controller is not None:
         emit('status', {'speeds': controller.get_all_speeds()})
-    emit('camera_status', {'available': camera_available})
+    with camera_lock:
+        emit('camera_status', {'available': camera_available})
 
 
 @sio.on('claim_video')
@@ -659,14 +791,16 @@ def on_stop(_data=None):
 
 
 def init_camera_async():
-    global camera_available, _camera_retry_in_flight
+    global camera_available
     try:
         init_camera()
     except Exception as e:
         camera_available = False
         logger.error('Camera init thread error: %s', e)
     finally:
-        _camera_retry_in_flight = False
+        with _camera_retry_lock:
+            global _camera_retry_in_flight
+            _camera_retry_in_flight = False
 
 
 def _cleanup():
@@ -702,8 +836,8 @@ def api_wifi_connect():
     data = request.get_json(silent=True)
     if not data or not isinstance(data, dict):
         return jsonify({'ok': False, 'error': 'Invalid request'}), 400
-    ssid = data.get('ssid', '').strip()
-    password = data.get('password', '').strip()
+    ssid = (data.get('ssid') or '').strip()
+    password = (data.get('password') or '').strip()
     result = wifi_manager.try_connect(ssid, password)
     return jsonify(result)
 
@@ -722,6 +856,14 @@ def main():
     hb = threading.Thread(target=heartbeat_log, daemon=True)
     hb.start()
 
+    stats_col = threading.Thread(target=_stats_collector, daemon=True)
+    stats_col.start()
+
+    global battery_monitor
+    battery_monitor = BatteryMonitor()
+    bat_thread = threading.Thread(target=battery_monitor.run_loop, daemon=True)
+    bat_thread.start()
+
     atexit.register(_cleanup)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
@@ -738,7 +880,7 @@ def main():
     logger.info('Motors: %s', ', '.join(MOTOR_NAMES))
     logger.info('Camera initializing in background...')
     logger.info('=' * 40)
-    serve(app, host='0.0.0.0', port=port, threads=4)
+    serve(app, host='0.0.0.0', port=port, threads=16)
 
 
 if __name__ == '__main__':

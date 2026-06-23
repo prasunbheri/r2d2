@@ -77,7 +77,7 @@ doc.add_heading('2.2 Wiring Diagram (GPIO Pin Assignment)', level=2)
 
 doc.add_paragraph('All connections use the bottom 10 pins of the Pi Zero W 40-pin header:')
 
-table2 = doc.add_table(rows=11, cols=4, style='Light Grid Accent 1')
+table2 = doc.add_table(rows=len(wiring) + 1, cols=4, style='Light Grid Accent 1')
 table2.alignment = WD_TABLE_ALIGNMENT.CENTER
 h2 = ['Physical Pin', 'BCM GPIO', 'Signal', 'Connected To']
 for i, h in enumerate(h2):
@@ -97,6 +97,8 @@ wiring = [
     ['38', 'GPIO20', 'DIR — Rear Right',      'MDD20A #2 — DIR2'],
     ['39', 'GND',    'Ground',                'MDD20A #2 — GND'],
     ['40', 'GPIO21', 'PWM — Rear Right',      'MDD20A #2 — PWM2'],
+    ['3',  'GPIO2',  'SDA (I2C-1)',           'ADS1115 — SDA'],
+    ['5',  'GPIO3',  'SCL (I2C-1)',           'ADS1115 — SCL'],
 ]
 for row_idx, row_data in enumerate(wiring, start=1):
     for col_idx, val in enumerate(row_data):
@@ -405,7 +407,6 @@ for item in edge_cases:
 doc.add_heading('9. Future Enhancements', level=1)
 future = [
     'Encoder feedback for closed-loop PID speed control',
-    'Battery voltage monitoring via MDD20A or external ADC',
     'WiFi AP mode: Pi creates its own network so phone connects directly without a hotspot',
     'MQTT integration for IoT / home automation connectivity',
     'ROS 2 integration for advanced robotics applications',

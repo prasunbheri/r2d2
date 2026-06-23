@@ -127,36 +127,36 @@ class MotorController:
                 time.sleep(SLEW_INTERVAL)
                 if not self.pi.connected and not self._reconnect():
                     continue
-                watchdog_fired = False
+
+                # Collect pending PWM updates under lock, apply outside to avoid
+                # holding the lock during slow pigpio I/O (which can retry for seconds).
+                pending = []
                 with self.lock:
                     if time.time() - self._last_cmd_time > WATCHDOG_TIMEOUT:
                         for m in MOTOR_NAMES:
                             self._target_speed[m] = 0
                             self._current_speed[m] = 0
-                        watchdog_fired = True
+                            pending.append(m)
+                    else:
+                        for m in MOTOR_NAMES:
+                            target = self._target_speed[m]
+                            current = self._current_speed[m]
+                            if current == target:
+                                continue
+                            if current * target < 0:
+                                self._current_speed[m] = 0
+                                pending.append(m)
+                                continue
+                            diff = target - current
+                            step = self.slew_rate
+                            if abs(diff) <= step:
+                                self._current_speed[m] = target
+                            else:
+                                self._current_speed[m] += step if diff > 0 else -step
+                            pending.append(m)
 
-                if watchdog_fired:
-                    for m in MOTOR_NAMES:
-                        self._apply_pwm(m)
-                    continue
-
-                with self.lock:
-                    for m in MOTOR_NAMES:
-                        target = self._target_speed[m]
-                        current = self._current_speed[m]
-                        if current == target:
-                            continue
-                        if current * target < 0:
-                            self._current_speed[m] = 0
-                            self._apply_pwm(m)
-                            continue
-                        diff = target - current
-                        step = self.slew_rate
-                        if abs(diff) <= step:
-                            self._current_speed[m] = target
-                        else:
-                            self._current_speed[m] += step if diff > 0 else -step
-                        self._apply_pwm(m)
+                for m in pending:
+                    self._apply_pwm(m)
             except Exception:
                 logger.exception('Slew loop error')
 

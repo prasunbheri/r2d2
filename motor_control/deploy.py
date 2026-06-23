@@ -10,7 +10,7 @@ LOCAL_DIR = os.path.dirname(os.path.abspath(__file__))
 REMOTE_DIR = '/home/r2tele/motor_control'
 
 FILES = [
-    'motor_control.py', 'app.py', 'watchdog.py',
+    'motor_control.py', 'app.py', 'battery.py', 'watchdog.py',
     'motor_control.service', 'watchdog.service',
     'requirements.txt', 'motor_control.sudoers',
     'deploy.sh',

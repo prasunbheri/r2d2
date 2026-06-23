@@ -214,7 +214,7 @@
 
   .conn-indicator {
     position: fixed; top: 12px; right: 12px; z-index: 50;
-    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    display: flex; flex-direction: row; align-items: center; gap: 4px;
   }
   .conn-dot {
     width: 12px; height: 12px; border-radius: 50%;
@@ -228,6 +228,14 @@
   }
   .conn-label.online { color: #2ecc71; }
   .conn-label.offline { color: #e94560; }
+  .bat-row { display: flex; flex-direction: row; align-items: center; gap: 3px; margin-left: 4px; font-size: 0.6rem; line-height: 1; white-space: nowrap; }
+  .bat-icon { display: flex; align-items: center; }
+  .bat-icon svg { width: 10px; height: 10px; }
+  .bat-volts { color: #aaa; }
+  .bat-pct { font-weight: 600; }
+  .bat-pct.ok { color: #2ecc71; }
+  .bat-pct.low { color: #e94560; }
+  .bat-pct.mid { color: #f39c12; }
 
   .settings-overlay {
     position: fixed; inset: 0; z-index: 200;
@@ -305,6 +313,13 @@
   }
   .wifi-input:focus { border-color: #4a5aae; }
   .wifi-msg { font-size: 0.7rem; min-height: 1.2em; margin-top: 4px; color: #888; }
+  .wifi-pwd-row { display: flex; align-items: center; gap: 6px; }
+  .wifi-pwd-row .wifi-input { flex: 1; }
+  .wifi-show-pwd {
+    font-size: 0.7rem; color: #888; white-space: nowrap;
+    display: flex; align-items: center; gap: 3px; cursor: pointer;
+  }
+  .wifi-show-pwd input { accent-color: #4ec; }
 
   .stats-overlay {
     position: fixed; inset: 0; z-index: 200;
@@ -435,6 +450,54 @@
   }
   .fullscreen-video .gear-btn, .fullscreen-video .conn-indicator { z-index: 70; }
 
+  .chart-overlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(10, 10, 30, 0.5);
+    backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.3s ease;
+  }
+  .chart-overlay.open { opacity: 1; pointer-events: auto; }
+  .chart-box {
+    background: rgba(26, 26, 46, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px; padding: 24px; width: 540px;
+    max-width: 92vw;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    position: relative;
+  }
+  .chart-close {
+    position: absolute; top: 8px; right: 12px;
+    font-size: 1.1rem; background: none; border: none; color: #888;
+    cursor: pointer; touch-action: manipulation;
+  }
+  .chart-tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+  .chart-tab {
+    background: #2a3a6e; color: #888; border: none; border-radius: 8px;
+    padding: 5px 14px; font-size: 0.8rem; font-weight: 600;
+    cursor: pointer; touch-action: manipulation; transition: all 0.2s;
+  }
+  .chart-tab.active { background: #e94560; color: #fff; }
+  .chart-legend { display: flex; gap: 14px; margin-bottom: 10px; flex-wrap: wrap; }
+  .chart-legend-item {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 0.75rem; color: #888; cursor: pointer;
+    user-select: none;
+  }
+  .chart-legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .chart-legend-item.hidden { color: #555; }
+  .chart-legend-item.hidden .chart-legend-dot { opacity: 0.25; }
+  .chart-canvas-wrap { width: 100%; height: 200px; }
+  .chart-canvas-wrap canvas { width: 100%; height: 100%; display: block; outline: none; }
+  .chart-back {
+    display: block; padding: 6px 12px; margin: 12px auto 0;
+    background: #2a3a6e; color: #ccc; border: none; border-radius: 6px;
+    font-size: 0.75rem; font-weight: 600; letter-spacing: 1px;
+    cursor: pointer; touch-action: manipulation;
+  }
+  .chart-back:active { background: #1e2d5a; }
+
 </style>
 </head>
 <body>
@@ -442,6 +505,11 @@
   <div class="conn-indicator">
     <div class="conn-dot offline" id="conn-dot"></div>
     <div class="conn-label offline" id="conn-label">offline</div>
+    <div class="bat-row" id="bat-row" style="display:none">
+      <span class="bat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="6" width="18" height="12" rx="2" ry="2"/><line x1="23" y1="10" x2="23" y2="14"/></svg></span>
+      <span class="bat-volts" id="bat-volts">--.--V</span>
+      <span class="bat-pct" id="bat-pct">--%</span>
+    </div>
   </div>
   <h1>R2 Control Bridge</h1>
   <div class="cam-wrap control hidden" id="cam-wrap">
@@ -534,6 +602,7 @@
       <div class="stats-row"><span class="stats-label">CPU (1m)</span><span class="stats-value" id="s-cpu">--</span></div>
       <div class="stats-row"><span class="stats-label">Memory</span><span class="stats-value" id="s-mem">--</span></div>
       <div class="stats-row"><span class="stats-label">CPU Temperature</span><span class="stats-value" id="s-temp">--</span></div>
+      <div class="stats-row"><span class="stats-label">Battery</span><span class="stats-value" id="s-battery">--</span></div>
       <div class="stats-row"><span class="stats-label">TX Rate</span><span class="stats-value" id="s-tx">--</span></div>
       <div class="stats-row"><span class="stats-label">RX Rate</span><span class="stats-value" id="s-rx">--</span></div>
       <div class="stats-row"><span class="stats-label">Threads</span><span class="stats-value" id="s-threads">--</span></div>
@@ -543,7 +612,21 @@
       <div class="stats-row"><span class="stats-label">Disk</span><span class="stats-value" id="s-disk">--</span></div>
       <div class="stats-row"><span class="stats-label">CPU Freq</span><span class="stats-value" id="s-cpufreq">--</span></div>
       <div class="stats-row"><span class="stats-label">Throttled</span><span class="stats-value" id="s-throttled">--</span></div>
+      <button class="stats-back" id="stats-performance">Performance</button>
       <button class="stats-back" id="stats-back">Back to Settings</button>
+    </div>
+  </div>
+
+  <div class="chart-overlay" id="chart-overlay">
+    <div class="chart-box">
+      <button class="chart-close" id="chart-close">✕</button>
+      <div class="chart-tabs">
+        <button class="chart-tab active" data-span="60s">60s</button>
+        <button class="chart-tab" data-span="10m">10m</button>
+      </div>
+      <div class="chart-legend" id="chart-legend"></div>
+      <div class="chart-canvas-wrap"><canvas id="chart-canvas"></canvas></div>
+      <button class="chart-back" id="chart-back">Back to Stats</button>
     </div>
   </div>
 
@@ -557,7 +640,10 @@
       <div id="wifi-list" class="wifi-list"></div>
       <div class="wifi-connect-row">
         <input id="wifi-ssid-input" class="wifi-input" placeholder="SSID" />
-        <input id="wifi-password-input" class="wifi-input" type="password" placeholder="Password" />
+        <div class="wifi-pwd-row">
+          <input id="wifi-password-input" class="wifi-input" type="password" placeholder="Password" />
+          <label class="wifi-show-pwd"><input type="checkbox" id="wifi-show-pwd" onchange="togglePwdVisibility()"> Show</label>
+        </div>
         <button id="wifi-connect-btn" class="wifi-btn wifi-connect-btn" onclick="wifiConnect()">Connect</button>
         <div id="wifi-msg" class="wifi-msg"></div>
       </div>
@@ -705,8 +791,12 @@ function chaseStep(timestamp) {
 
   if (dist < 0.5) {
     applyJoy(targetX, targetY);
-    chaseId = null;
     lastChaseTime = 0;
+    if (targetX === 0 && targetY === 0) {
+      chaseId = null;
+      return;
+    }
+    chaseId = requestAnimationFrame(chaseStep);
     return;
   }
 
@@ -923,6 +1013,28 @@ let fpsPoll = setInterval(async () => {
   } catch (_) {}
 }, 5000);
 
+// Battery voltage polling
+const batRow = document.getElementById('bat-row');
+const batVolts = document.getElementById('bat-volts');
+const batPct = document.getElementById('bat-pct');
+setInterval(async () => {
+  try {
+    const r = await fetch('/api/battery');
+    const d = await r.json();
+    if (d.available) {
+      batRow.style.display = 'flex';
+      batVolts.textContent = d.voltage.toFixed(2) + 'V';
+      const pct = d.percentage;
+      batPct.textContent = pct.toFixed(0) + '%';
+      batPct.className = 'bat-pct' + (pct > 50 ? ' ok' : pct > 20 ? ' mid' : ' low');
+    } else {
+      batRow.style.display = 'none';
+    }
+  } catch (_) {
+    batRow.style.display = 'none';
+  }
+}, 5000);
+
 // Toggle auto-center
 toggleSwitch.addEventListener('click', () => {
   autoCenter = !autoCenter;
@@ -1029,6 +1141,9 @@ async function fetchStats() {
     document.getElementById('s-disk').textContent = d.disk_usage.used_gb + ' / ' + d.disk_usage.total_gb + ' GB (' + d.disk_usage.percent + '%)';
     document.getElementById('s-cpufreq').textContent = d.cpu_freq + ' MHz';
     document.getElementById('s-throttled').textContent = d.throttled.flags.length ? d.throttled.flags.join(', ') : 'OK';
+    const br = await fetch('/api/battery');
+    const bd = await br.json();
+    document.getElementById('s-battery').textContent = bd.available ? bd.voltage.toFixed(2) + 'V (' + bd.percentage.toFixed(0) + '%)' : 'N/A';
   } catch (_) {}
 }
 document.getElementById('stats-btn').addEventListener('click', () => {
@@ -1044,6 +1159,7 @@ function closeStats() {
 }
 document.getElementById('stats-close').addEventListener('click', closeStats);
 document.getElementById('stats-back').addEventListener('click', closeStats);
+document.getElementById('stats-performance').addEventListener('click', openChart);
 
 const overlay = document.getElementById('reconnect-overlay');
 const dotsEl = document.getElementById('dots-el');
@@ -1228,6 +1344,8 @@ window.addEventListener('beforeunload', () => {
 });
 
 // WiFi functions
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
 function openWifiPanel() {
   document.getElementById('wifi-overlay').classList.add('open');
   wifiScan();
@@ -1260,11 +1378,12 @@ async function wifiScan() {
       const signal = parseInt(n.signal) || 0;
       const bars = signal >= 80 ? '\u2588\u2588\u2588' : signal >= 60 ? '\u2588\u2588\u2583' : signal >= 40 ? '\u2588\u2583\u2581' : '\u2583\u2581\u2581';
       const active = n.ssid === d.current;
-      html += '<div class="wifi-net' + (active ? ' active' : '') + '" data-ssid="' + n.ssid.replace(/"/g, '&quot;') + '" onclick="wifiSelect(this)">' +
+      var es = esc(n.ssid);
+      html += '<div class="wifi-net' + (active ? ' active' : '') + '" data-ssid="' + es + '" onclick="wifiSelect(this)">' +
         '<span class="wifi-net-dot ' + (active ? 'on' : 'off') + '"></span>' +
-        '<span class="wifi-net-ssid">' + n.ssid + '</span>' +
+        '<span class="wifi-net-ssid">' + es + '</span>' +
         '<span class="wifi-bars">' + bars + '</span>' +
-        (n.security ? '<span class="wifi-net-sec">' + n.security.replace(/[* ]/g,'').substring(0,4) + '</span>' : '') +
+        (n.security ? '<span class="wifi-net-sec">' + esc(n.security).replace(/[* ]/g,'').substring(0,4) + '</span>' : '') +
         '</div>';
     }
     list.innerHTML = html;
@@ -1273,6 +1392,12 @@ async function wifiScan() {
   } finally {
     btn.disabled = false; btn.textContent = 'Scan';
   }
+}
+
+function togglePwdVisibility() {
+  const pwd = document.getElementById('wifi-password-input');
+  const cb = document.getElementById('wifi-show-pwd');
+  pwd.type = cb.checked ? 'text' : 'password';
 }
 
 function wifiSelect(el) {
@@ -1298,21 +1423,26 @@ async function wifiConnect() {
     const d = await r.json();
     if (d.ok) {
       msg.style.color = '#2ecc71';
+      var es = esc(d.ssid || '');
+      var eip = esc(d.ip || '...');
       msg.innerHTML = (
-        '<div style="font-weight:600;font-size:0.85rem;margin-bottom:4px">✅ Connected to <b>' + d.ssid + '</b></div>' +
+        '<div style="font-weight:600;font-size:0.85rem;margin-bottom:4px">\u2705 Connected to <b>' + es + '</b></div>' +
         '<div style="font-size:0.8rem">Your device is now on a different network.</div>' +
-        '<div style="font-size:0.8rem;word-break:break-all">Reconnect at <b style="color:#4ec">http://' + (d.ip || '...') + ':5000</b></div>' +
+        '<div style="font-size:0.8rem;word-break:break-all">Reconnect at <b style="color:#4ec">http://' + eip + ':5000</b></div>' +
         '<div style="font-size:0.7rem;margin-top:4px;color:#888">or try <b style="color:#888">http://r2tele.local:5000</b></div>'
       );
       wifiScan();
       wifiStatus();
     } else {
-      msg.textContent = d.error || 'Failed';
+      const errMsg = d.error || 'Failed';
+      msg.textContent = errMsg;
       msg.style.color = '#e94560';
+      showError(errMsg);
     }
   } catch (e) {
     msg.textContent = 'Connection failed';
     msg.style.color = '#e94560';
+    showError('Connection failed');
   } finally {
     btn.disabled = false; btn.textContent = 'Connect';
   }
@@ -1340,6 +1470,7 @@ document.addEventListener('visibilitychange', () => {
     if (fpsPoll) { clearInterval(fpsPoll); fpsPoll = null; }
     if (camPoll) { clearInterval(camPoll); camPoll = null; }
     if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
+    if (chartInterval) { clearInterval(chartInterval); chartInterval = null; }
   } else {
     if (!fpsPoll) fpsPoll = setInterval(async () => {
       try {
@@ -1352,7 +1483,221 @@ document.addEventListener('visibilitychange', () => {
     if (statsOverlay.classList.contains('open') && !statsInterval) {
       statsInterval = setInterval(fetchStats, 5000);
     }
+    if (document.getElementById('chart-overlay').classList.contains('open') && !chartInterval) {
+      chartInterval = setInterval(fetchChartData, 3000);
+    }
   }
+});
+
+// --- Performance Chart ---
+const CHART_SERIES = [
+  { key: 'cpu', label: 'CPU', color: '#e94560' },
+  { key: 'temp', label: 'Temp', color: '#f39c12' },
+  { key: 'fps', label: 'FPS', color: '#2ecc71' },
+  { key: 'delay', label: 'Delay', color: '#3498db' },
+  { key: 'bat', label: 'Battery', color: '#9b59b6' },
+];
+let chartVisible = { cpu: true, temp: true, fps: true, delay: true, bat: true };
+let chartSpan = '60s';
+let chartData = [];
+let chartInterval = null;
+let chartCanvas = null;
+let chartInitd = false;
+
+function buildChartLegend() {
+  const el = document.getElementById('chart-legend');
+  el.innerHTML = '';
+  CHART_SERIES.forEach(function(s) {
+    var item = document.createElement('div');
+    item.className = 'chart-legend-item' + (chartVisible[s.key] ? '' : ' hidden');
+    item.dataset.key = s.key;
+    item.innerHTML = '<span class="chart-legend-dot" style="background:' + s.color + '"></span>' + s.label;
+    item.addEventListener('click', function() {
+      chartVisible[s.key] = !chartVisible[s.key];
+      item.classList.toggle('hidden', !chartVisible[s.key]);
+      drawChart();
+    });
+    el.appendChild(item);
+  });
+}
+
+function resizeChartCanvas() {
+  if (!chartCanvas) return;
+  var wrap = chartCanvas.parentElement;
+  var rect = wrap.getBoundingClientRect();
+  var dpr = window.devicePixelRatio || 1;
+  chartCanvas.width = rect.width * dpr;
+  chartCanvas.height = rect.height * dpr;
+}
+
+async function fetchChartData() {
+  try {
+    var r = await fetch('/api/stats/history?span=' + chartSpan);
+    var d = await r.json();
+    chartData = d.samples || [];
+    drawChart();
+  } catch (_) {}
+}
+
+function drawChart() {
+  if (!chartCanvas) return;
+  var wrap = chartCanvas.parentElement;
+  var rect = wrap.getBoundingClientRect();
+  var W = rect.width;
+  var H = rect.height;
+  var dpr = window.devicePixelRatio || 1;
+  if (chartCanvas.width !== W * dpr || chartCanvas.height !== H * dpr) {
+    chartCanvas.width = W * dpr;
+    chartCanvas.height = H * dpr;
+  }
+  var ctx = chartCanvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  var pad = { top: 20, right: 12, bottom: 30, left: 48 };
+  var cw = W - pad.left - pad.right;
+  var ch = H - pad.top - pad.bottom;
+
+  ctx.clearRect(0, 0, W, H);
+
+  var keys = [];
+  for (var k in chartVisible) {
+    if (chartVisible[k] && chartData.length > 0 && typeof chartData[0][k] === 'number') keys.push(k);
+  }
+  if (keys.length === 0 || chartData.length < 2) {
+    ctx.fillStyle = '#555';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '13px sans-serif';
+    ctx.fillText('No data', W / 2, H / 2);
+    return;
+  }
+
+  // Find Y range
+  var yMin = Infinity, yMax = -Infinity;
+  for (var i = 0; i < chartData.length; i++) {
+    for (var j = 0; j < keys.length; j++) {
+      var v = chartData[i][keys[j]];
+      if (typeof v === 'number' && isFinite(v)) {
+        if (v < yMin) yMin = v;
+        if (v > yMax) yMax = v;
+      }
+    }
+  }
+  if (!isFinite(yMin) || !isFinite(yMax) || yMax === yMin) { yMin = 0; yMax = 100; }
+  var range = yMax - yMin;
+  yMin -= range * 0.1;
+  yMax += range * 0.1;
+
+  // Grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 1;
+  var gridLines = 4;
+  for (var i = 0; i <= gridLines; i++) {
+    var y = pad.top + (ch / gridLines) * i;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(W - pad.right, y);
+    ctx.stroke();
+  }
+
+  // Y axis labels
+  ctx.fillStyle = '#666';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (var i = 0; i <= gridLines; i++) {
+    var val = yMax - (yMax - yMin) * i / gridLines;
+    var label = val >= 100 ? val.toFixed(0) : val.toFixed(1);
+    ctx.fillText(label, pad.left - 6, pad.top + (ch / gridLines) * i);
+  }
+
+  // Lines per series
+  var colors = { cpu: '#e94560', temp: '#f39c12', fps: '#2ecc71', delay: '#3498db', bat: '#9b59b6' };
+  for (var j = 0; j < keys.length; j++) {
+    var k = keys[j];
+    ctx.strokeStyle = colors[k] || '#fff';
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    var started = false;
+    var len = chartData.length;
+    for (var i = 0; i < len; i++) {
+      var v = chartData[i][k];
+      if (typeof v !== 'number' || !isFinite(v)) continue;
+      var x = pad.left + (len > 1 ? (i / (len - 1)) * cw : cw / 2);
+      var y = pad.top + ch - ((v - yMin) / (yMax - yMin)) * ch;
+      if (!started) { ctx.moveTo(x, y); started = true; }
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  // X axis (relative time)
+  var t0 = chartData[0].t;
+  var t1 = chartData[chartData.length - 1].t;
+  var duration = t1 - t0;
+  ctx.fillStyle = '#666';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  var labelCount = Math.min(6, Math.max(2, Math.floor(cw / 65)));
+  for (var i = 0; i <= labelCount; i++) {
+    var frac = i / labelCount;
+    var secs = duration * frac;
+    var label;
+    if (chartSpan === '10m') label = (secs / 60).toFixed(0) + 'm';
+    else label = secs.toFixed(0) + 's';
+    ctx.fillText(label, pad.left + frac * cw, H - pad.bottom + 6);
+  }
+}
+
+function openChart() {
+  statsOverlay.classList.remove('open');
+  if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
+  document.getElementById('chart-overlay').classList.add('open');
+  if (!chartInitd) {
+    chartCanvas = document.getElementById('chart-canvas');
+    buildChartLegend();
+    chartInitd = true;
+  }
+  resizeChartCanvas();
+  fetchChartData();
+  if (!chartInterval) chartInterval = setInterval(fetchChartData, 3000);
+}
+
+function closeChart() {
+  document.getElementById('chart-overlay').classList.remove('open');
+  if (chartInterval) { clearInterval(chartInterval); chartInterval = null; }
+}
+
+document.getElementById('chart-close').addEventListener('click', closeChart);
+document.getElementById('chart-back').addEventListener('click', function() {
+  closeChart();
+  statsOverlay.classList.add('open');
+  if (!statsInterval) statsInterval = setInterval(fetchStats, 5000);
+  fetchStats();
+});
+
+// Chart tab switching
+document.querySelectorAll('.chart-tab').forEach(function(tab) {
+  tab.addEventListener('click', function() {
+    document.querySelectorAll('.chart-tab').forEach(function(t) { t.classList.remove('active'); });
+    tab.classList.add('active');
+    chartSpan = tab.dataset.span;
+    fetchChartData();
+  });
+});
+
+// Resize chart on window resize
+var chartResizeTimer = null;
+window.addEventListener('resize', function() {
+  clearTimeout(chartResizeTimer);
+  chartResizeTimer = setTimeout(function() {
+    if (document.getElementById('chart-overlay').classList.contains('open')) {
+      resizeChartCanvas();
+      drawChart();
+    }
+  }, 200);
 });
 </script>
 </body>
