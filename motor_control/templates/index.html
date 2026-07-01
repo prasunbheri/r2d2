@@ -33,7 +33,7 @@
   }
   .joystick-base:active { cursor: grabbing; }
   .joystick-knob {
-    position: absolute; width: 64px; height: 64px; border-radius: 50%;
+    position: absolute; width: 56px; height: 56px; border-radius: 50%;
     background: radial-gradient(circle at 35% 35%, #e94560, #c0392b);
     box-shadow: 0 4px 15px rgba(233,69,96,0.5), inset 0 -2px 6px rgba(0,0,0,0.3);
     top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -415,6 +415,12 @@
     body .gear-btn { z-index: 20; }
   }
 
+  @media (orientation: portrait) {
+    .joystick-area {
+      width: min(60vw, 250px); height: min(60vw, 250px);
+    }
+  }
+
   /* Fullscreen video overlay mode */
   .fullscreen-video .cam-wrap {
     position: fixed; inset: 0; z-index: 50;
@@ -513,7 +519,7 @@
   </div>
   <h1>R2 Control Bridge</h1>
   <div class="cam-wrap control hidden" id="cam-wrap">
-    <img src="/video_feed" id="cam-feed" alt="camera">
+    <img src="/video_feed" id="cam-feed" alt="camera" onerror="handleCamError()">
     <div class="cam-fps" id="cam-fps">-- fps</div>
     <button class="snap-btn" id="snap-btn" title="Capture snapshot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></button>
     <div class="cam-placeholder" id="cam-placeholder">
@@ -716,7 +722,16 @@ function updateDisplay() {
 let _cachedLimit = parseInt(limiterSlider.value) / 100;
 limiterSlider.addEventListener('input', () => { _cachedLimit = parseInt(limiterSlider.value) / 100; });
 
+function curveJoystick(val) {
+  const sign = val < 0 ? -1 : 1;
+  const p = Math.abs(val) / 100;
+  if (p !== p || !isFinite(p)) return 0;
+  return sign * Math.pow(p, 1.3) * 100;
+}
+
 function computeMotorSpeeds(x, y) {
+  x = curveJoystick(x);
+  y = curveJoystick(y);
   const limit = _cachedLimit;
   const fl = (y + x) * limit;
   const fr = (y - x) * limit;
@@ -737,7 +752,7 @@ function sendSpeeds(speeds) {
   const now = Date.now();
   const isZero = Object.values(speeds).every(v => v === 0);
   if (isZero || now - lastSpeedSend >= SPEED_THROTTLE) {
-    socket.emit('set_speeds', { speeds });
+    try { socket.emit('set_speeds', { speeds }); } catch (_) {}
     lastSpeedSend = now;
   }
   currentSpeeds = speeds;
@@ -746,7 +761,8 @@ function sendSpeeds(speeds) {
 
 function flushSpeeds() {
   const speeds = computeMotorSpeeds(joyX, joyY);
-  socket.emit('set_speeds', { speeds });
+  try { socket.emit('set_speeds', { speeds }); } catch (_) {}
+  lastSpeedSend = Date.now();
 }
 
 function clientToJoy(clientX, clientY) {
@@ -757,6 +773,7 @@ function clientToJoy(clientX, clientY) {
   const dy = clientY - cy;
   const dist = Math.sqrt(dx * dx + dy * dy);
   const maxDist = maxKnobDist();
+  if (maxDist <= 0) return { joyX: 0, joyY: 0, pxX: 0, pxY: 0 };
   let clampedX = dx, clampedY = dy;
   if (dist > maxDist) {
     clampedX = (dx / dist) * maxDist;
@@ -773,7 +790,9 @@ function clientToJoy(clientX, clientY) {
 function applyJoy(x, y) {
   joyX = x; joyY = y;
   const maxDist = maxKnobDist();
-  knob.style.transform = `translate(calc(-50% + ${(x / 100) * maxDist}px), calc(-50% + ${-(y / 100) * maxDist}px))`;
+  if (maxDist > 0) {
+    knob.style.transform = `translate(calc(-50% + ${(x / 100) * maxDist}px), calc(-50% + ${-(y / 100) * maxDist}px))`;
+  }
   const speeds = computeMotorSpeeds(x, y);
   sendSpeeds(speeds);
 }
@@ -794,7 +813,6 @@ function chaseStep(timestamp) {
     applyJoy(targetX, targetY);
     lastChaseTime = 0;
     if (targetX === 0 && targetY === 0) {
-      flushSpeeds();
       chaseId = null;
       return;
     }
@@ -991,7 +1009,7 @@ function shutdownStart() {
 
 document.getElementById('shutdown-yes').addEventListener('click', () => {
   shutdownConfirmOverlay.classList.remove('visible');
-  fetch('/api/shutdown', { method: 'POST' });
+  fetch('/api/shutdown', { method: 'POST' }).catch(() => {});
 });
 document.getElementById('shutdown-no').addEventListener('click', () => {
   shutdownConfirmOverlay.classList.remove('visible');
@@ -1004,22 +1022,24 @@ document.addEventListener('touchend', shutdownAbort);
 document.addEventListener('mouseleave', shutdownAbort);
 document.addEventListener('touchcancel', shutdownAbort);
 
-// FPS counter via camera_status polling (5s interval to reduce server load)
+// FPS counter via camera_status polling
 const fpsEl = document.getElementById('cam-fps');
-let fpsPoll = setInterval(async () => {
+const FPS_POLL_INTERVAL = 2000;
+async function fpsPollFn() {
   try {
     const r = await fetch('/api/camera_status');
     const d = await r.json();
-    const fps = d.fps || 0;
-    fpsEl.textContent = Math.round(fps) + ' fps';
+    fpsEl.textContent = Math.round(d.fps || 0) + ' fps';
   } catch (_) {}
-}, 5000);
+}
+let fpsPoll = setInterval(fpsPollFn, FPS_POLL_INTERVAL);
 
 // Battery voltage polling
 const batRow = document.getElementById('bat-row');
 const batVolts = document.getElementById('bat-volts');
 const batPct = document.getElementById('bat-pct');
-setInterval(async () => {
+let batInterval = setInterval(batPoll, 5000);
+async function batPoll() {
   try {
     const r = await fetch('/api/battery');
     const d = await r.json();
@@ -1035,7 +1055,16 @@ setInterval(async () => {
   } catch (_) {
     batRow.style.display = 'none';
   }
-}, 5000);
+}
+
+// Stop battery polling when page is hidden
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (batInterval) { clearInterval(batInterval); batInterval = null; }
+  } else {
+    if (!batInterval) { batPoll(); batInterval = setInterval(batPoll, 5000); }
+  }
+});
 
 // Toggle auto-center
 toggleSwitch.addEventListener('click', () => {
@@ -1053,8 +1082,11 @@ stopBtn.addEventListener('click', () => {
   stopChase();
   active = false;
   targetX = targetY = 0;
-  applyJoy(0, 0);
-  flushSpeeds();
+  joyX = joyY = 0;
+  knob.style.transform = 'translate(-50%, -50%)';
+  currentSpeeds = { FL: 0, FR: 0, RL: 0, RR: 0 };
+  updateDisplay();
+  try { socket.emit('stop'); } catch (_) {}
 });
 
 // Gear button – toggle settings overlay
@@ -1070,13 +1102,14 @@ document.getElementById('settings-close').addEventListener('click', () => {
 
 // Keyboard controls: arrows = joystick, space = stop, tab = auto-center
 const KEY_STEP = 20;
+let keyboardActive = false;
 document.addEventListener('keydown', (e) => {
   if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
   switch (e.key) {
-    case 'ArrowUp': e.preventDefault(); startChase(joyX, Math.min(joyY + KEY_STEP, 100)); break;
-    case 'ArrowDown': e.preventDefault(); startChase(joyX, Math.max(joyY - KEY_STEP, -100)); break;
-    case 'ArrowLeft': e.preventDefault(); startChase(Math.max(joyX - KEY_STEP, -100), joyY); break;
-    case 'ArrowRight': e.preventDefault(); startChase(Math.min(joyX + KEY_STEP, 100), joyY); break;
+    case 'ArrowUp': e.preventDefault(); keyboardActive = true; startChase(joyX, Math.min(joyY + KEY_STEP, 100)); break;
+    case 'ArrowDown': e.preventDefault(); keyboardActive = true; startChase(joyX, Math.max(joyY - KEY_STEP, -100)); break;
+    case 'ArrowLeft': e.preventDefault(); keyboardActive = true; startChase(Math.max(joyX - KEY_STEP, -100), joyY); break;
+    case 'ArrowRight': e.preventDefault(); keyboardActive = true; startChase(Math.min(joyX + KEY_STEP, 100), joyY); break;
     case ' ': e.preventDefault(); stopBtn.click(); break;
     case 'Tab': e.preventDefault(); toggleSwitch.click(); break;
   }
@@ -1085,7 +1118,7 @@ document.addEventListener('keyup', (e) => {
   if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
   if (e.key.startsWith('Arrow') && autoCenter) {
     e.preventDefault();
-    active = false;
+    keyboardActive = false;
     startChase(0, 0);
   }
 });
@@ -1122,27 +1155,29 @@ async function fetchStats() {
     const d = await r.json();
     const rtt = performance.now() - t1;
     const now = d.server_time;
-    const delay = d.frame_time > 0 ? Math.max(0, (now - d.frame_time) * 1000 + rtt / 2) : 0;
+    const delay = d.frame_time > 0 ? Math.max(0, (now - (d.frame_time || now)) * 1000 + rtt / 2) : 0;
     document.getElementById('s-latency').textContent = rtt.toFixed(0) + ' ms';
     document.getElementById('s-delay').textContent = Math.round(delay) + ' ms';
-    document.getElementById('s-fps').textContent = d.fps;
+    document.getElementById('s-fps').textContent = d.fps || 0;
     document.getElementById('s-fps-target').textContent = d.fps_target;
-    document.getElementById('s-res').textContent = d.resolution.join('\u00d7');
-    document.getElementById('s-cpu').textContent = (parseFloat(d.load[0]) / d.cpu_count * 100).toFixed(0) + '%';
-    const mt = parseInt(d.memory.MemTotal) / 1024 || 0;
-    const ma = parseInt(d.memory.MemAvailable) / 1024 || 0;
+    document.getElementById('s-res').textContent = (d.resolution || []).join('\u00d7');
+    document.getElementById('s-cpu').textContent = ((parseFloat(d.load?.[0]) || 0) / (d.cpu_count || 1) * 100).toFixed(0) + '%';
+    const mt = parseInt(d.memory?.MemTotal) / 1024 || 0;
+    const ma = parseInt(d.memory?.MemAvailable) / 1024 || 0;
     document.getElementById('s-mem').textContent = ma.toFixed(0) + ' / ' + mt.toFixed(0) + ' MB';
-    document.getElementById('s-temp').textContent = d.temp.replace('temp=', '');
-    document.getElementById('s-tx').textContent = d.tx_rate_kbps < 1000 ? d.tx_rate_kbps + ' KB/s' : (d.tx_rate_kbps / 1024).toFixed(1) + ' MB/s';
-    document.getElementById('s-rx').textContent = d.rx_rate_kbps < 1000 ? d.rx_rate_kbps + ' KB/s' : (d.rx_rate_kbps / 1024).toFixed(1) + ' MB/s';
-    document.getElementById('s-threads').textContent = d.thread_count;
-    const days = Math.floor(d.uptime / 86400);
-    const hours = Math.floor((d.uptime % 86400) / 3600);
-    const mins = Math.floor((d.uptime % 3600) / 60);
+    document.getElementById('s-temp').textContent = (d.temp || '').replace('temp=', '');
+    const tx = d.tx_rate_kbps || 0;
+    const rx = d.rx_rate_kbps || 0;
+    document.getElementById('s-tx').textContent = tx < 1000 ? tx + ' KB/s' : (tx / 1024).toFixed(1) + ' MB/s';
+    document.getElementById('s-rx').textContent = rx < 1000 ? rx + ' KB/s' : (rx / 1024).toFixed(1) + ' MB/s';
+    document.getElementById('s-threads').textContent = d.thread_count || 0;
+    const days = Math.floor((d.uptime || 0) / 86400);
+    const hours = Math.floor(((d.uptime || 0) % 86400) / 3600);
+    const mins = Math.floor(((d.uptime || 0) % 3600) / 60);
     document.getElementById('s-uptime').textContent = (days ? days + 'd ' : '') + hours + 'h ' + mins + 'm';
-    document.getElementById('s-disk').textContent = d.disk_usage.used_gb + ' / ' + d.disk_usage.total_gb + ' GB (' + d.disk_usage.percent + '%)';
-    document.getElementById('s-cpufreq').textContent = d.cpu_freq + ' MHz';
-    document.getElementById('s-throttled').textContent = d.throttled.flags.length ? d.throttled.flags.join(', ') : 'OK';
+    document.getElementById('s-disk').textContent = (d.disk_usage?.used_gb || 0) + ' / ' + (d.disk_usage?.total_gb || 0) + ' GB (' + (d.disk_usage?.percent || 0) + '%)';
+    document.getElementById('s-cpufreq').textContent = (d.cpu_freq || 0) + ' MHz';
+    document.getElementById('s-throttled').textContent = (d.throttled?.flags || []).length ? d.throttled.flags.join(', ') : 'OK';
     const br = await fetch('/api/battery');
     const bd = await br.json();
     document.getElementById('s-battery').textContent = bd.available ? bd.voltage.toFixed(2) + 'V (' + bd.percentage.toFixed(0) + '%)' : 'N/A';
@@ -1167,6 +1202,7 @@ const overlay = document.getElementById('reconnect-overlay');
 const dotsEl = document.getElementById('dots-el');
 let dotsTimer = null;
 function startDots() {
+  if (dotsTimer) clearInterval(dotsTimer);
   let c = 0;
   dotsTimer = setInterval(() => {
     c = (c + 1) % 4;
@@ -1224,6 +1260,18 @@ function showPlaceholder() {
   camWrap.classList.remove('hidden');
   placeholder.classList.remove('hidden');
   cam.src = '';
+}
+
+let camErrorRetry = null;
+function handleCamError() {
+  const cam = document.getElementById('cam-feed');
+  if (camErrorRetry) clearTimeout(camErrorRetry);
+  camErrorRetry = setTimeout(() => {
+    if (videoOwner) {
+      cam.src = '/video_feed?sid=' + (socket.id || '') + '&t=' + Date.now();
+      camErrorRetry = null;
+    }
+  }, 3000);
 }
 
 function showVideoHere() {
@@ -1330,9 +1378,6 @@ function startCamPoll() {
           const cam = document.getElementById('cam-feed');
           camWrap.classList.remove('hidden');
           cam.src = '/video_feed?sid=' + (socket.id || '') + '&t=' + Date.now();
-        } else {
-          const camWrap = document.getElementById('cam-wrap');
-          camWrap.classList.remove('hidden');
         }
       }
     } catch (_) {}
@@ -1344,9 +1389,12 @@ startCamPoll();
 window.addEventListener('beforeunload', () => {
   if (videoOwner) socket.emit('release_video');
 });
+window.addEventListener('pagehide', () => {
+  if (videoOwner) socket.emit('release_video');
+});
 
 // WiFi functions
-function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 function openWifiPanel() {
   document.getElementById('wifi-overlay').classList.add('open');
@@ -1474,13 +1522,7 @@ document.addEventListener('visibilitychange', () => {
     if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
     if (chartInterval) { clearInterval(chartInterval); chartInterval = null; }
   } else {
-    if (!fpsPoll) fpsPoll = setInterval(async () => {
-      try {
-        const r = await fetch('/api/camera_status');
-        const d = await r.json();
-        fpsEl.textContent = Math.round(d.fps || 0) + ' fps';
-      } catch (_) {}
-    }, 2000);
+    if (!fpsPoll) fpsPoll = setInterval(fpsPollFn, FPS_POLL_INTERVAL);
     if (!camPoll) startCamPoll();
     if (statsOverlay.classList.contains('open') && !statsInterval) {
       statsInterval = setInterval(fetchStats, 5000);

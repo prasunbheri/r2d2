@@ -37,19 +37,16 @@ class TestSetSpeed:
         app_module.controller.stop_all()
         client = self._make_client()
         client.emit('set_speed', {'motor': 'FL', 'speed': 75})
-        received = client.get_received()
-        assert len(received) > 0
-        status = received[-1]['args'][0]
-        assert status['speeds']['FL'] == 75
+        assert app_module.controller.get_speed('FL') == 75
+        assert app_module.controller.get_speed('FR') == 0
         client.disconnect()
 
     def test_set_speed_reverse(self):
         app_module.controller.stop_all()
         client = self._make_client()
         client.emit('set_speed', {'motor': 'FR', 'speed': -60})
-        received = client.get_received()
-        status = received[-1]['args'][0]
-        assert status['speeds']['FR'] == -60
+        assert app_module.controller.get_speed('FR') == -60
+        assert app_module.controller.get_speed('FL') == 0
         client.disconnect()
 
     def test_set_speed_invalid_motor_ignored(self):

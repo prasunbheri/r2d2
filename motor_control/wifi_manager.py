@@ -40,8 +40,10 @@ def _nmcli(args: list, timeout: int = 15) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(full_args, -1, '', 'nmcli not found')
 
 
-def _clean_stderr(stderr: str) -> str:
+def _clean_stderr(stderr: Optional[str]) -> str:
     """Filter known-harmless nmcli warnings from stderr, keep real errors."""
+    if not isinstance(stderr, str) or not stderr.strip():
+        return ''
     lines = [l for l in stderr.strip().split('\n') if l.strip()]
     filtered = [l for l in lines if not l.strip().startswith('Warning:')]
     return '\n'.join(filtered) if filtered else ''
@@ -74,7 +76,15 @@ def _describe_nmcli_failure(result: subprocess.CompletedProcess, ssid: str) -> s
     return 'Connection did not establish (check password or signal strength)'
 
 
+_scan_cache: List[Dict] = []
+_scan_cache_time: float = 0.0
+_SCAN_CACHE_TTL: float = 4.0
+
 def scan() -> List[Dict]:
+    global _scan_cache, _scan_cache_time
+    now = time.time()
+    if now - _scan_cache_time < _SCAN_CACHE_TTL:
+        return _scan_cache
     result = _nmcli(['-t', '-f', 'SSID,SIGNAL,SECURITY', 'device', 'wifi', 'list'], timeout=20)
     networks = []
     for line in result.stdout.strip().split('\n'):
@@ -89,6 +99,8 @@ def scan() -> List[Dict]:
             })
     _ssids = [n['ssid'] for n in networks]
     logger.info('Scan found %d networks: %s', len(networks), _ssids)
+    _scan_cache = networks
+    _scan_cache_time = time.time()
     return networks
 
 
@@ -343,14 +355,14 @@ def stop_ap():
                 except Exception:
                     pass
             _hotspot_process = None
-    for cmd in [
-        ['sudo', 'nmcli', 'connection', 'down', 'Hotspot'],
-        ['sudo', 'nmcli', 'connection', 'delete', 'Hotspot'],
-    ]:
-        try:
-            subprocess.run(cmd, capture_output=True, timeout=10)
-        except Exception:
-            pass
+        for cmd in [
+            ['sudo', 'nmcli', 'connection', 'down', 'Hotspot'],
+            ['sudo', 'nmcli', 'connection', 'delete', 'Hotspot'],
+        ]:
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=10)
+            except Exception:
+                pass
 
 
 def current_mode() -> str:

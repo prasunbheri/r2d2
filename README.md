@@ -137,13 +137,13 @@ A web-controlled 4-motor differential drive system for a Raspberry Pi Zero W, fe
 | Layer | Technology | Purpose |
 |---|---|---|---|
 | **GPIO/PWM** | `pigpio` (pigpiod daemon) | Hardware-timed DMA PWM on any GPIO, 20 kHz, no jitter, silent operation |
-| **Motor Control** | `motor_control.py` | 4-motor abstraction with threading lock, target/current speed, 50Hz slew (7%/tick), 2s watchdog, pigpiod reconnect |
-| **Web Server** | `app.py` (Flask + Flask-SocketIO + Waitress) | HTTP server (waitress threads=6), polling-only SocketIO, HW MJPEG camera stream, REST API |
-| **Dashboard** | `templates/index.html` | Mobile-first dark-theme SPA with virtual joystick, FPS counter, settings, stats overlay, reconnection overlay |
-| **Watchdog** | `watchdog.py` | Independent sysfs GPIO monitor (no pigpio), auto-restarts failed services, structured logging |
-| **Camera** | `picamera2` + HW MJPEG (`/dev/video11`) | GPU-encoded MJPEG via `start_recording(MJPEGEncoder)`, YUV420 output, minimal CPU cost |
-| **Process Management** | systemd units | `pigpiod.service`, `motor_control.service`, `watchdog.service` with dependency chain and auto-restart |
-| **Deployment** | `deploy.py` (pexpect), `deploy.sh` (bash) | One-command SSH deploy to Pi, now includes `static/` directory |
+| **Motor Control** | `motor_control.py` | 4-motor abstraction with threading lock, target/current speed, 50Hz slew (7%/tick), 0.5s watchdog, pigpiod reconnect (15 retries × 1s), direction-flip instant brake |
+| **Web Server** | `app.py` (Flask + Flask-SocketIO + Waitress) | HTTP server (waitress threads=16), polling-only SocketIO (no WebSocket), HW MJPEG camera stream, REST API with origin validation, graceful cleanup on shutdown |
+| **Dashboard** | `templates/index.html` | Mobile-first dark-theme SPA with virtual joystick (pow 1.3 non-linear curve), zero-speed throttle bypass, instant STOP, FPS counter, settings, stats overlay, reconnection overlay, battery polling pause on hide |
+| **Watchdog** | `watchdog.py` | Independent GPIO monitor via pigpio (not sysfs), auto-restarts failed services, structured logging |
+| **Camera** | `picamera2` + HW MJPEG (`/dev/video11`) | GPU-encoded MJPEG via `start_recording(MJPEGEncoder)`, YUV420 output, minimal CPU cost, 30s stale-frame stream auto-close |
+| **Process Management** | systemd units | `pigpiod.service`, `motor_control.service`, `watchdog.service` with dependency chain and auto-restart, `MemoryMax=384M` |
+| **Deployment** | `deploy.sh` (bash) | One-command SSH deploy to Pi, includes tests + pre-compile + boot optimization |
 
 ---
 
@@ -291,43 +291,45 @@ MotorController
 │   ├── Create threading.Lock for all pigpio writes
 │   └── Start 50Hz slew daemon thread
 │
+├── _slew_loop()  (daemon thread, 50Hz)
+│   ├── For each motor (under lock):
+│   │   ├── If direction changed (current × target < 0): brake to 0 instantly
+│   │   ├── Else: ramp _current_speed toward _target at 7%/tick
+│   │   └── Collect pending PWM updates
+│   ├── Apply all PWM outside the lock (avoids blocking pigpio I/O)
+│   ├── 0.5s watchdog: zero all targets + currents if no command for 0.5s
+│   └── sleep(0.02) between iterations
+│
+├── _apply_pwm(motor)  (no lock — called only by slew thread or stop_all)
+│   ├── If speed == 0: set duty=0, return (dir pin untouched)
+│   ├── If speed > 0: DIR=1, duty = speed/100 × 1000
+│   ├── If speed < 0: DIR=0, duty = |speed|/100 × 1000
+│   └── On pigpio error → _reconnect() (3 retries × 0.5s)
+│       └── If all fail: zero _current_speed for that motor
+│
+├── _reconnect()
+│   ├── Try pigpio.pi() up to 3 attempts
+│   ├── On success: stop old pi, re-initialize all 8 GPIO pins
+│   └── Return True/False
+│
 ├── set_speed(motor, speed)
 │   ├── Validate motor name
-│   ├── Clamp speed to [-100, 100]
+│   ├── Clamp speed to [-100, 100] (NaN → 0)
 │   └── Write _target_speed[motor] (slew thread ramps gradually)
 │
 ├── set_speeds(speeds_dict)
-│   └── Bulk set multiple motors (all target-speed writes)
+│   ├── Validate all motor names (pre-lock; rejects entire batch on invalid)
+│   └── Bulk set multiple motors under single lock + single timestamp
 │
 ├── set_all(speed)
 │   └── Set all 4 motors to same target speed
 │
 ├── stop_all()
-│   └── Set all targets to 0 + reset watchdog timer
+│   ├── Under lock: zero all _target_speed AND _current_speed
+│   └── Outside lock: _apply_pwm() for all motors (immediate stop)
 │
 ├── get_speed(motor) / get_all_speeds()
 │   └── Return _target_speed (commanded speed, not current)
-│
-├── _slew_loop()  (daemon thread, 50Hz)
-│   ├── For each motor:
-│   │   ├── If direction changed: brake to 0 instantly
-│   │   ├── Else: ramp _current_speed toward _target at 7%/tick
-│   │   └── Write DIR + PWM only when _current_speed changes
-│   ├── 2s watchdog: zero all targets if no set_speed call
-│   └── sleep(0.02) between iterations
-│
-├── _write_motor(motor, speed, dir)
-│   ├── Acquire threading.Lock
-│   ├── Write DIR pin (1=forward, 0=reverse)
-│   ├── Compute duty: |speed|/100 * 1000
-│   ├── Write PWM dutycycle
-│   └── On pigpio error → _reconnect_pigpio (3 retries × 0.5s)
-│
-├── _reconnect_pigpio()
-│   ├── Stop + close old pi connection
-│   ├── Connect to new pi() — up to 3 attempts
-│   ├── Re-initialize all 8 GPIO pins
-│   └── On total failure: zero all motors via _write_motor(fallback=0)
 │
 └── cleanup()
     ├── Set all targets to 0, wait for slew
@@ -346,9 +348,14 @@ MotorController
 
 ```
   +100 ───────────────────── Full forward (DIR=1, duty=1000)
-    0  ───────────────────── Stopped  (DIR=1, duty=0)
-  -100 ───────────────────── Full reverse (DIR=0, duty=1000)
+    0  ───────────────────── Stopped  (duty=0, dir pin untouched)
+   -100 ───────────────────── Full reverse (DIR=0, duty=1000)
 ```
+
+> When speed=0, the PWM duty is set to 0 without touching the direction pin,
+> eliminating ghost pulses from direction flips during fast stop→reverse transitions.
+> 
+> A 0.5s watchdog zeros all motors if no command is received within that window.
 
 **Differential Steering Mixing:**
 
@@ -369,13 +376,13 @@ This gives tank-like differential steering:
 
 ### 2. Web Server (`app.py`)
 
-Flask + Flask-SocketIO application served via **Waitress** (threads=6), with polling-only SocketIO (no WebSocket upgrade under waitress). Serves dashboard, HW MJPEG camera stream, REST APIs, and handles joystick commands.
+Flask + Flask-SocketIO application served via **Waitress** (threads=16), with polling-only SocketIO (no WebSocket upgrade under waitress). All SocketIO handlers wrapped in try/except. Serves dashboard, HW MJPEG camera stream, REST APIs with origin validation, and handles joystick commands.
 
 **Startup Sequence:**
 
 ```
 main()
-├── Create MotorController (pigpio connection)
+├── Create MotorController (pigpio connection, 15 retries × 1s)
 ├── Initialize camera in background thread
 │   └── init_camera_async()
 │       ├── Acquire camera_lock
@@ -389,7 +396,7 @@ main()
 │   ├── Retry camera init if failed (target_fps != 0)
 │   └── Log thread count
 ├── Log startup banner
-└── waitress.serve(app, host='0.0.0.0', port=5000, threads=6)
+└── waitress.serve(app, host='0.0.0.0', port=5000, threads=16)
 ```
 
 **SocketIO Transport:**
@@ -398,10 +405,33 @@ main()
 - WebSocket upgrade fails with `RuntimeError` under waitress
 - Reconnection uses exponential backoff: 250ms initial, ×1.5 per attempt, 3s cap, 0.3 randomization
 
+**SocketIO Handlers:**
+
+All handlers (`connect`, `set_speed`, `set_speeds`, `stop`, `claim_video`, `release_video`, `disconnect`) are wrapped in `try/except` to prevent unhandled exceptions from crashing the server:
+
+- `on_set_speed` — sets single motor speed; does **not** emit `'status'` back (avoided thread-per-emit CPU spike)
+- `on_set_speeds` — bulk set with input validation (type checks, unknown motor skip); does not emit `'status'` 
+- `on_stop` — calls `controller.stop_all()` (immediate stop) + emits `'status'` with all-zero speeds
+- `on_claim_video` / `on_release_video` — manage `_video_owner_sid` with lost-event broadcast
+
+**Origin Validation:**
+
+Sensitive HTTP endpoints (`/api/set_resolution`, `/api/set_framerate`, `/api/settings` POST, `/api/wifi/connect`, `/api/shutdown`) check the `Origin` or `Referer` header against `_VALID_ORIGINS`:
+
+```python
+_VALID_ORIGINS = ['r2tele.local', '10.42.0.1', '192.168.', '172.16.', 'localhost', '127.0.0.1']
+```
+
+Requests from unknown origins return `403 Forbidden`.
+
 **Thread Safety:**
 
-- `MotorController._lock` — internal threading.Lock wraps all pigpio writes (motor speed updates, slew thread, watchdog)
+- `MotorController.lock` — internal threading.Lock wraps all shared state (target/current speeds, watchdog timestamp, reconnect). Slew loop collects pending updates under lock, applies PWM outside lock.
 - `camera_lock` — threading.Lock for camera lifecycle (`start_recording` / `stop_recording` / reconfiguration must be atomic)
+- `_frame_lock` — guards `latest_frame` / `latest_frame_time` / `camera_fps` from concurrent access by camera output thread and HTTP stream generator
+- `_video_owner_lock` — guards `_video_owner_sid` from concurrent SocketIO handler calls
+- `_streams_lock` — guards active stream count
+- `_camera_retry_lock` — prevents unbounded retry threads
 - All background threads are daemon (die with main process)
 
 **Camera (HW MJPEG):**
@@ -411,8 +441,13 @@ Uses VideoCore GPU encoder via `/dev/video11` (`bcm2835-codec-decode`):
 - `Picamera2` outputs **YUV420** (NV12 not in picamera2 V4L2 lookup table)
 - `MJPEGEncoder` → `CircularOutput` produces HW-encoded JPEG frames
 - `outputframe` in `CircularOutput` receives raw bytes (no copy needed)
-- Adaptive sleep: `1.0/target_fps * 0.8` (minimum 10ms)
 - Format change cleared by `stop_recording()` → `stop()` → `close()` → full re-init
+
+**Video Stream Leak Protection:**
+
+- 30s no-frame timeout: if no new frame is received for 30s, the HTTP generator exits, freeing the stream slot
+- `MAX_STREAMS=3` concurrent streams limit
+- `_video_owner_sid` ensures only the claiming client can fetch video
 
 **Camera Reconfiguration (Resolution):**
 
@@ -456,8 +491,9 @@ with camera_lock:
 
 **Shutdown:**
 
-- `POST /api/shutdown` calls `controller.stop_all()` (ramps motors to 0)
-- Then `echo r2tele | sudo -S shutdown -h now` in daemon thread
+- `POST /api/shutdown` calls `_cleanup()` which stops motors (`controller.stop_all()` + `controller.cleanup()`), then stops the camera (`_stop_camera()`), then cleans up the battery monitor (`battery_monitor.cleanup()`)
+- After cleanup, runs `sudo shutdown -h now` in daemon thread
+- `SIGTERM` handler: `sys.exit(0)` → triggers `atexit.register(_cleanup)`
 
 ### 3. Watchdog (`watchdog.py`)
 
@@ -500,7 +536,7 @@ watchdog.py
 
 ### 4. WiFi Manager (`wifi_manager.py`)
 
-Autonomous WiFi switching with safe fallback via NetworkManager CLI (`nmcli`). All operations run through `sudo nmcli`.
+Autonomous WiFi switching with safe fallback via NetworkManager CLI (`nmcli`). All operations run through `sudo nmcli`. Scan results are cached for 4s to avoid blocking `/api/wifi/status` on every call.
 
 ```
 try_connect(ssid, password)
@@ -529,7 +565,7 @@ _revert_or_ap()
 
 ### 5. Battery Monitor (`battery.py`)
 
-Background thread that reads the **ADS1115** ADC over I2C every 5 seconds. Runs independently from the motor controller — failure does not affect driving.
+Background thread that reads the **ADS1115** ADC over I2C every 5 seconds (or every 30s on error). Uses a rolling 5-sample average for smooth readings. Runs independently from the motor controller — failure does not affect driving.
 
 ```
 BatteryMonitor
@@ -537,18 +573,27 @@ BatteryMonitor
 ├── __init__()
 │   ├── Open SMBus on /dev/i2c-1
 │   ├── Write config register: AIN0 vs GND, ±6.144 V, continuous mode, 860 SPS
+│   │   └── On write failure: close bus, raise (bus leak prevention)
 │   └── Set self._available = True (or False on failure)
 │
 ├── read()
 │   ├── Read 2 bytes from conversion register
 │   ├── Convert raw ADC value to voltage: V_adc = raw × 6.144 / 32768
 │   ├── Apply divider ratio: V_bat = V_adc × (R1 + R2) / R2
+│   ├── Append to 5-element rolling window, compute smoothed average
 │   ├── Compute percentage from LiFePO₄ 4S curve
-│   └── Update self._voltage / self._percentage
+│   └── On read failure: increment retry counter; after MAX_RETRIES (3), mark unavailable and close bus
 │
-├── run_loop()
-│   ├── Every 5s (while available): call read()
-│   └── Every 30s (if unavailable): try_reconnect()
+├── run_loop()  (daemon thread)
+│   ├── While self._running:
+│   │   ├── If unavailable: try_reconnect() → _init_bus()
+│   │   └── If available: read()
+│   └── Sleep 5s (available) or 30s (unavailable)
+│
+├── cleanup()
+│   ├── Set self._running = False (stops run_loop)
+│   ├── Close I2C bus
+│   └── Mark unavailable
 │
 └── get_data()
     └── Return {"voltage": float, "percentage": float, "available": bool}
@@ -569,17 +614,20 @@ Single-page application with dark theme, mobile-first responsive design, and off
 | Component | Description |
 |---|---|
 | **Connection Indicator** | Green/red dot + "online"/"offline" label + battery voltage/percentage at top-right |
-| **Camera Feed** | MJPEG stream via `<img src="/video_feed">` with FPS counter overlay |
-| **Virtual Joystick** | 200×200px circular base with 64px knob, mouse + touch support, cardinal direction labels |
+| **Camera Feed** | MJPEG stream via `<img src="/video_feed">` with FPS counter overlay, 3s auto-retry on error |
+| **Virtual Joystick** | 200×200px circular base with 56px knob, mouse + touch support, cardinal direction labels, pow(1.3) non-linear curve for finer center control |
 | **Auto-Center Toggle** | CSS switch: when on, joystick snaps to zero on release; when off, holds last position |
-| **STOP Button** | Emergency stop — sets all motors to 0 immediately |
+| **STOP Button** | Emits `socket.emit('stop')` — calls `controller.stop_all()` on server for **instant** motor stop (no slew) |
 | **Motor Speed Display** | 4-panel grid showing FL/FR/RL/RR speeds (green for forward, red for reverse) |
 | **Settings Overlay** | Gear button top-left opens modal with sliders for Joystick Speed (`step=5`, `min=10`), Speed Limiter (`step=5`), Resolution, Frame Rate |
 | **WiFi Button** | 📶 icon bottom-center (inside gear menu) — opens WiFi overlay with scan, connect, status |
-| **Shutdown Button** | ⏻ icon bottom-left — 5-second long-press with countdown, then stops motors + `sudo shutdown -h now` |
+| **Shutdown Button** | ⏻ icon bottom-left — 5-second long-press with countdown, then stops motors + camera + battery + `sudo shutdown -h now` |
 | **Stats Button** | ℹ icon bottom-right — opens overlay polling `/api/stats` every 5s |
 | **Reconnection Overlay** | Full-screen dimmed overlay with CSS animated dots when connection lost |
 | **Landscape Layout** | CSS media query rearranges to video-left / joystick-right layout on phones in landscape |
+| **Fullscreen Video** | Double-click on video toggles fullscreen overlay with floating mini-controls |
+| **Performance Chart** | Canvas-based real-time chart plotting CPU, temp, FPS, delay, battery over 60s/10m spans |
+| **Snapshot** | Download/share current camera frame as JPEG |
 
 **JavaScript Architecture:**
 
@@ -587,19 +635,40 @@ Single-page application with dark theme, mobile-first responsive design, and off
 index.html JS
 │
 ├── SocketIO Client (v4.7.5, served from /static/socket.io.min.js, polling transport)
-│   ├── connect → emit 'connect', receive status + camera_status
-│   ├── set_speed → send motor speed update
-│   ├── set_speeds → send bulk speed update (throttled 50ms)
-│   ├── stop → emergency stop
+│   ├── connect → emit 'claim_video', receive video_owner + camera_status
+│   ├── set_speed → send single motor speed update (no status echo)
+│   ├── set_speeds → send bulk speed update (throttled 50ms, zero-speed bypass)
+│   ├── stop → emergency stop (controller.stop_all() — immediate)
+│   ├── claim_video / release_video → video ownership handshake
 │   ├── disconnect → show reconnection overlay
-│   └── reconnect → hide overlay, reload camera image
+│   └── reconnect → hide overlay, re-claim video
 │
 ├── Joystick Engine
-│   ├── Touch/mouse event handlers
+│   ├── Touch/mouse event handlers with separate keyboardActive flag
+│   ├── curveJoystick(x) → pow(1.3) non-linear curve
 │   ├── computeMotorSpeeds(x, y) → differential steering
 │   ├── Chase animation with requestAnimationFrame
 │   ├── Auto-center return when toggle is on
-│   └── Speed scaling via Speed Limiter slider
+│   ├── Speed scaling via Speed Limiter slider (cached, real-time recompute)
+│   └── flushSpeeds() — sends current position, updates lastSpeedSend
+│
+├── Speed Throttle
+│   ├── SPEED_THROTTLE = 50ms between non-zero sends
+│   ├── Zero-speed bypass: isZero check ignores throttle (auto-center always arrives)
+│   └── flushSpeeds updates lastSpeedSend to prevent stale throttle window
+│
+├── Background Polling (paused on tab hide via visibilitychange)
+│   ├── FPS counter: /api/camera_status every 2s
+│   ├── Battery: /api/battery every 5s
+│   ├── Camera status poll (camPoll): 3s when camera unavailable
+│   ├── Stats: 5s interval while stats overlay open
+│   └── Chart: 3s interval while chart open
+│
+├── Camera Management
+│   ├── video_owner event → showVideo() with sid+cache-bust URL
+│   ├── handleCamError() → 3s auto-retry with videoOwner guard
+│   ├── pagehide → release_video (frees server stream slot)
+│   └── camPoll → reconnects video stream when camera recovers
 │
 ├── Settings Persistence
 │   ├── On connect: GET /api/settings, apply saved values
@@ -612,27 +681,29 @@ index.html JS
 │   └── FPS counter polls /api/camera_status every 2s
 │
 ├── Resolution Control
-│   ├── Slider 0–4 → POST /api/set_resolution (async)
+│   ├── Slider 0–4 → POST /api/set_resolution (async, debounced 300ms)
 │   └── Cache-busting via Date.now() query param
 │
 ├── Battery Display
 │   ├── Polls /api/battery every 5s
 │   ├── Shows voltage + percentage next to connection indicator
-│   └── Color-coded percentage: green (>50%), yellow (>20%), red (≤20%)
+│   ├── Color-coded percentage: green (>50%), yellow (>20%), red (≤20%)
+│   └── Hidden when unavailable
 │
 ├── Stats Overlay
 │   ├── ℹ button opens overlay polling /api/stats every 5s
-│   └── Shows memory, load, net TX/RX, uptime, temperature, battery
+│   └── Shows latency, frame delay, memory, load, net TX/RX, uptime, temperature, battery, CPU freq, throttled flags
 │
 ├── Performance Chart
-│   ├── Charts tab with 60s / 10m spans
-│   ├── Plots CPU, Temp, FPS, Delay, and Battery percentage
+│   ├── Canvas-based with pow(1.3) non-linear curve
+│   ├── Chart tabs with 60s / 10m spans
+│   ├── Plots CPU, Temp, FPS, Delay, and Battery voltage
 │   └── Toggle series on/off via legend
 │
 └── Shutdown Logic
     ├── mousedown/mousedown → start 5s countdown
     ├── Visual feedback (orange .holding) + countdown text
-    └── Release aborts → POST /api/shutdown (stops motors + poweroff)
+    └── Release aborts → POST /api/shutdown (stops motors + camera + battery + poweroff)
 ```
 
 **Chase Animation:**
@@ -640,12 +711,12 @@ index.html JS
 All joystick movement (grab, drag, return-to-center) uses constant-speed per-frame animation:
 
 ```
-MIN_SPEED = 1
-MAX_SPEED = 15
+MIN_SPEED = 10
+MAX_SPEED = 300
 per_frame_speed = MIN_SPEED + (MAX_SPEED - MIN_SPEED) * (sliderValue / 100)
 ```
 
-Each animation frame moves the knob `per_frame_speed` pixels toward the target, giving smooth, predictable motion regardless of frame rate.
+Each animation frame moves the knob `per_frame_speed / 60 * dt` units toward the target, giving smooth, predictable motion regardless of frame rate. The `startChase()` / `stopChase()` pattern ensures clean transitions between mouse, touch, and keyboard inputs.
 
 **Responsive Design:**
 
@@ -660,22 +731,24 @@ Each animation frame moves the knob `per_frame_speed` pixels toward the target, 
 
 ### HTTP Endpoints
 
-| Endpoint | Method | Description | Request | Response |
+| Endpoint | Method | Description | Origin Check | Response |
 |---|---|---|---|---|---|
 | `/` | GET | Serve dashboard HTML | — | `text/html` |
-| `/video_feed` | GET | MJPEG camera stream | — | `multipart/x-mixed-replace` |
+| `/video_feed` | GET | MJPEG camera stream (requires valid `sid` query param matching video owner) | — | `multipart/x-mixed-replace` |
 | `/api/camera_status` | GET | Camera availability + FPS | — | `{"available": bool, "fps": float}` |
 | `/api/settings` | GET | Load saved settings | — | `{"joystick_speed": int, "max_speed_limiter": int, "resolution_index": int, "fps": int}` |
-| `/api/settings` | POST | Save joystick_speed + max_speed_limiter | `{"joystick_speed": 70, "max_speed_limiter": 50}` | `{"ok": true}` |
-| `/api/set_resolution` | POST | Change camera resolution | `{"index": 0-4}` | `{"ok": true, "resolution": [w, h]}` |
-| `/api/set_framerate` | POST | Change camera framerate (0=off) | `{"fps": 9}` | `{"ok": true, "fps": 9}` |
-| `/api/shutdown` | POST | Stop motors + shutdown the Pi | — | `{"ok": true}` |
-| `/api/stats` | GET | System stats (memory/load/net/uptime/temp) | — | `{"mem": {...}, "load": [...], "net": {...}, "uptime": float, "temp": float}` |
+| `/api/settings` | POST | Save joystick_speed + max_speed_limiter | ✓ | `{"ok": true}` |
+| `/api/set_resolution` | POST | Change camera resolution | ✓ | `{"ok": true, "resolution": [w, h]}` |
+| `/api/set_framerate` | POST | Change camera framerate (0=off) | ✓ | `{"ok": true, "fps": label}` |
+| `/api/shutdown` | POST | Stop motors + camera + battery + shutdown the Pi | ✓ | `{"ok": true}` |
+| `/api/stats` | GET | System stats (memory/load/net/uptime/temp) | — | `{"memory": {}, "load": [...], "temp": "...", ...}` |
+| `/api/stats/history` | GET | Historical stats samples | — | `{"samples": [...], "span": "60s"}` |
 | `/api/debug` | GET | Debug information | — | `{"thread_count": int, "camera_available": bool, ...}` |
-| `/api/wifi/scan` | GET | Scan nearby WiFi networks | — | `{"networks": [...], "current": "SSID"}` |
+| `/api/wifi/scan` | GET | Scan nearby WiFi networks (4s cache) | — | `{"networks": [...], "current": "SSID"}` |
 | `/api/wifi/status` | GET | Current WiFi connection info | — | `{"ssid": "...", "signal": 80, "ip": "...", "mode": "station"}` |
+| `/api/wifi/connect` | POST | Connect to a WiFi network | ✓ | `{"ok": true, "ssid": "...", "ip": "..."}` |
 | `/api/battery` | GET | Battery voltage and percentage | — | `{"voltage": 12.64, "percentage": 67.3, "available": true}` |
-| `/api/wifi/connect` | POST | Connect to a WiFi network | `{"ssid": "...", "password": "..."}` | `{"ok": true, "ssid": "...", "ip": "..."}` |
+| `/api/health` | GET | Health check | — | `{"ok": true}` |
 
 **Resolution Index Mapping:**
 
@@ -693,17 +766,21 @@ Each animation frame moves the knob `per_frame_speed` pixels toward the target, 
 
 | Event | Payload | Description |
 |---|---|---|
-| `connect` | — | Client connects; server responds with `status` and `camera_status` |
-| `set_speed` | `{"motor": "FL", "speed": 75}` | Set speed for one motor |
-| `set_speeds` | `{"speeds": {"FL": 50, "FR": -30, ...}}` | Bulk set all motor speeds (throttled to 50ms) |
-| `stop` | — | Emergency stop all motors |
+| `connect` | — | Client connects; server responds with `status`, `camera_status`, and `video_owner` |
+| `set_speed` | `{"motor": "FL", "speed": 75}` | Set speed for one motor (no status echo — avoids thread-per-emit CPU spike) |
+| `set_speeds` | `{"speeds": {"FL": 50, "FR": -30, ...}}` | Bulk set motor speeds (client-throttled to 50ms; zero-speed bypass for auto-center) |
+| `stop` | — | Emergency stop — calls `controller.stop_all()` (immediate zero, no slew) |
+| `claim_video` | — | Claim video ownership (broadcasts `video_lost` to previous owner) |
+| `release_video` | — | Release video ownership |
 
 **Server → Client:**
 
 | Event | Payload | Description |
 |---|---|---|
-| `status` | `{"speeds": {"FL": 50, ...}}` | Current motor speeds (confirming update) |
-| `camera_status` | `{"available": true}` | Camera availability status |
+| `status` | `{"speeds": {"FL": 50, ...}}` | Current motor speeds (emitted on `connect` and `stop` only) |
+| `camera_status` | `{"available": true}` | Camera availability change |
+| `video_owner` | `{"sid": "..."}` | Current video owner session ID |
+| `video_lost` | `{"new_owner": "..."}` | Video ownership taken by another client |
 
 ---
 
@@ -734,9 +811,9 @@ Percentage is linearly interpolated between 10.0 V (0%) and 14.4 V (100%).
 
 ### Software
 
-- **`battery.py`** — `BatteryMonitor` class configures the ADS1115 for continuous conversion on AIN0 vs GND at ±6.144 V range, 860 SPS. Polls every 5 seconds in a background thread.
+- **`battery.py`** — `BatteryMonitor` class configures the ADS1115 for continuous conversion on AIN0 vs GND at ±6.144 V range, 860 SPS. Polls every 5 seconds in a background thread with a rolling 5-sample smoothing average. On I2C errors, retries up to 3 times before marking unavailable (retries every 30s). The `cleanup()` method sets a `_running` flag to prevent the daemon thread from re-creating I2C connections after shutdown.
 - **`/api/battery`** — Returns `{"voltage": 12.64, "percentage": 67.3, "available": true}`
-- **Dashboard** — Battery voltage and percentage shown next to the connection indicator (top-right), in the Stats overlay, and as a plottable metric in the Performance chart.
+- **Dashboard** — Battery voltage and percentage shown next to the connection indicator (top-right), in the Stats overlay, and as a plottable metric in the Performance chart. Polling pauses when the browser tab is hidden.
 
 ### Configuration
 
@@ -846,8 +923,10 @@ REQUIRED_SERVICES = ['pigpiod', 'motor_control.service']
 ```ini
 Restart=on-failure
 RestartSec=2
-StartLimitInterval=60
-StartLimitBurst=3
+StartLimitInterval=120
+StartLimitBurst=5
+MemoryMax=384M
+LimitNOFILE=1024
 ```
 
 **watchdog.service:**
@@ -855,12 +934,32 @@ StartLimitBurst=3
 ```ini
 Restart=on-failure
 RestartSec=5
+MemoryMax=64M
+LimitNOFILE=512
 ```
 
-### Static Assets
+**pre-cache.service:**
 
-- SocketIO client v4.7.5 served from `/home/r2tele/motor_control/static/socket.io.min.js`
-- No CDN dependency — works in air-gapped environments (phone hotspot without internet)
+```ini
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c "find ... -name '*.pyc' -o -name '*.so' | tar | dd of=/dev/null bs=4M"
+```
+
+### ADS1115 Battery Constants (`battery.py`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `ADS1115_ADDR` | `0x48` | I2C address (ADDR pin to GND) |
+| `DIVIDER_TOP` | 33_000 | Top resistor in Ω |
+| `DIVIDER_BOTTOM` | 10_000 | Bottom resistor in Ω |
+| `CELLS` | 4 | Number of series cells |
+| `V_FULL` | 3.6 × CELLS | Full charge voltage per cell |
+| `V_EMPTY` | 2.5 × CELLS | Cutoff voltage per cell |
+| `POLL_INTERVAL` | 5 | Seconds between reads when available |
+| `RETRY_INTERVAL` | 30 | Seconds between retry attempts on error |
+| `MAX_RETRIES` | 3 | Consecutive read failures before marking unavailable |
+| `SMOOTHING_WINDOW` | 5 | Rolling average window size |
 
 ---
 
@@ -902,39 +1001,28 @@ sudo journalctl -u watchdog.service -n 50 --no-pager        # Check watchdog
 
 ### Thread count growing
 
-The `set_speeds` event is throttled client-side to once every 50ms. If you see the thread count growing in the heartbeat log, verify the client-side throttle:
+The `set_speeds` event is throttled client-side to once every 50ms. The server side no longer emits `'status'` from `on_set_speed` (the old thread-per-emit was the main cause). Verify the client-side throttle in `index.html`:
 
 ```javascript
-// index.html — throttle logic
-let last_send = 0;
-const THROTTLE_MS = 50;
-
+const SPEED_THROTTLE = 50;
 function sendSpeeds(speeds) {
     const now = Date.now();
-    if (now - last_send < THROTTLE_MS) return;
-    last_send = now;
-    socket.emit('set_speeds', { speeds });
+    const isZero = Object.values(speeds).every(v => v === 0);
+    if (isZero || now - lastSpeedSend >= SPEED_THROTTLE) {
+        socket.emit('set_speeds', { speeds });
+        lastSpeedSend = now;
+    }
 }
 ```
 
 ### Shutdown not working
 
-The shutdown endpoint calls `controller.stop_all()` then runs `sudo shutdown -h now` with password piped via `echo r2tele | sudo -S`. If the password has changed, update `app.py`:
+The shutdown endpoint calls `_cleanup()` which stops motors (`controller.stop_all()` + `controller.cleanup()`), camera (`_stop_camera()`), and battery monitor (`battery_monitor.cleanup()`), then runs `sudo shutdown -h now`.
 
-```python
-os.system('echo YOUR_PASSWORD | sudo -S shutdown -h now')
-```
-
-Alternatively, configure passwordless sudo for the shutdown command:
+If the password has changed, update the sudoers file:
 
 ```bash
 echo 'r2tele ALL=(ALL) NOPASSWD: /sbin/shutdown' | sudo tee /etc/sudoers.d/shutdown
-```
-
-Then simplify to:
-
-```python
-os.system('sudo shutdown -h now')
 ```
 
 ---
@@ -1024,25 +1112,24 @@ ADS1115 ───┬── VDD ──► Pi pin 1 (3.3V)
 ```
 r2d2/
 ├── README.md
-├── gen_doc.py
-├── R2_Motor_Control_Plan.docx
 ├── .gitignore
 │
 ├── motor_control/
-│   ├── app.py                     # Flask + SocketIO web server, camera management
-│   ├── battery.py                 # ADS1115 ADC → battery voltage monitor
-│   ├── watchdog.py                # sysfs GPIO service monitor + LED patterns
-│   ├── wifi_manager.py            # WiFi scanning, connection, AP fallback
+│   ├── app.py                     # Flask + SocketIO web server, camera management (942 lines)
+│   ├── battery.py                 # ADS1115 ADC → battery voltage monitor with smoothing (137 lines)
+│   ├── motor_control.py           # 4-motor pigpio controller with slew + watchdog (229 lines)
+│   ├── watchdog.py                # pigpio GPIO service monitor + LED patterns (226 lines)
+│   ├── wifi_manager.py            # WiFi scanning, connection, AP fallback (375 lines)
 │   ├── wifi_known.json            # Runtime — last 5 trusted SSID/password pairs
 │   ├── motor_control.service      # systemd unit for web server
 │   ├── watchdog.service           # systemd unit for watchdog
 │   ├── pre-cache.service          # systemd unit for bytecode preloading
-│   ├── boot_optimize.sh           # Boot-time optimization script
-│   ├── deploy.py                  # Python deployment script (pexpect)
+│   ├── motor_control.sudoers      # Passwordless sudo rules
+│   ├── boot_optimize.sh           # Boot-time optimization script (415 lines)
 │   ├── deploy.sh                  # Bash deployment script (scp + ssh)
 │   │
 │   ├── templates/
-│   │   └── index.html             # Dashboard SPA (856 lines)
+│   │   └── index.html             # Dashboard SPA (1745 lines)
 │   │
 │   ├── static/
 │   │   └── socket.io.min.js       # SocketIO client v4.7.5 (served locally)
@@ -1050,9 +1137,9 @@ r2d2/
 │   └── tests/
 │       ├── __init__.py            # Package marker
 │       ├── mock_pigpio.py         # Complete pigpio mock for testing
-│       ├── test_motor_control.py  # 29 tests
-│       ├── test_app.py            # 7 tests
-│       └── test_watchdog.py       # 14 tests
+│       ├── test_motor_control.py  # 31 tests
+│       ├── test_app.py            # 11 tests
+│       └── test_watchdog.py       # 22 tests
 │
 └── (other project files)
 ```
@@ -1065,4 +1152,4 @@ MIT License — see LICENSE file if present, or use freely.
 
 ---
 
-*R2 Motor Controller v2.2 — Built for Raspberry Pi Zero W with Cytron MDD20A drivers and MY6812 motors.*
+*R2 Motor Controller v2.3 — Built for Raspberry Pi Zero W with Cytron MDD20A drivers and MY6812 motors.*

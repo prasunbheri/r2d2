@@ -11,7 +11,7 @@ PWM_FREQ: int = 20000
 PWM_RANGE: int = 1000
 SLEW_RATE: int = 7
 SLEW_INTERVAL: float = 0.02
-WATCHDOG_TIMEOUT: float = 2.0
+WATCHDOG_TIMEOUT: float = 0.5
 PIGPIO_RETRY_ATTEMPTS: int = 15
 PIGPIO_RETRY_INTERVAL: float = 1.0
 
@@ -33,6 +33,9 @@ def validate_motor(motor: str) -> None:
 def clamp_speed(speed: object) -> int:
     if not isinstance(speed, (int, float)):
         logger.warning('clamp_speed received non-numeric %s', type(speed).__name__)
+        return 0
+    if isinstance(speed, float) and (speed != speed):
+        logger.warning('clamp_speed received NaN')
         return 0
     return max(-100, min(100, int(speed)))
 
@@ -196,7 +199,10 @@ class MotorController:
         with self.lock:
             for motor in MOTOR_NAMES:
                 self._target_speed[motor] = 0
+                self._current_speed[motor] = 0
             self._last_cmd_time = now
+        for motor in MOTOR_NAMES:
+            self._apply_pwm(motor)
 
     def get_speed(self, motor: str) -> int:
         validate_motor(motor)

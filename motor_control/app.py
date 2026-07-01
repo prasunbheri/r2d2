@@ -106,6 +106,16 @@ def get_ip() -> str:
         return '127.0.0.1'
 
 
+_VALID_ORIGINS = ['r2tele.local', '10.42.0.1', '192.168.', '172.16.', 'localhost', '127.0.0.1']
+
+def _origin_check():
+    origin = request.headers.get('Origin', '') or request.headers.get('Referer', '')
+    if any(h in origin for h in _VALID_ORIGINS):
+        return True
+    logger.warning('Request rejected: invalid origin %s', origin)
+    return False
+
+
 def _make_camera_output():
     """Create an Output that stores the latest HW-encoded MJPEG frame."""
     from picamera2.outputs import Output
@@ -234,8 +244,11 @@ def api_camera_status():
 
 @app.route('/api/set_resolution', methods=['POST'])
 def api_set_resolution():
+    if not _origin_check():
+        return jsonify({'ok': False, 'error': 'forbidden'}), 403
     global current_resolution
-    res_idx = request.json.get('index', 1)
+    data = request.get_json(silent=True) or {}
+    res_idx = data.get('index', 1)
     if not isinstance(res_idx, int) or res_idx < 0 or res_idx >= len(RESOLUTIONS):
         return jsonify({'ok': False, 'error': 'invalid index'}), 400
     with camera_lock:
@@ -283,8 +296,11 @@ def _reconfigure_camera(res_idx, w, h):
 
 @app.route('/api/set_framerate', methods=['POST'])
 def api_set_framerate():
+    if not _origin_check():
+        return jsonify({'ok': False, 'error': 'forbidden'}), 403
     global target_fps, camera_available
-    val = request.json.get('fps')
+    data = request.get_json(silent=True) or {}
+    val = data.get('fps')
     if not isinstance(val, int) or val < 0 or val > 60:
         return jsonify({'ok': False, 'error': 'invalid fps'}), 400
     with fps_lock:
@@ -314,6 +330,8 @@ def api_set_framerate():
 def api_settings():
     global joystick_speed, max_speed_limiter
     if request.method == 'POST':
+        if not _origin_check():
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
         data = request.json or {}
         if 'joystick_speed' in data:
             val = data['joystick_speed']
@@ -333,9 +351,7 @@ def api_settings():
 
 @app.route('/api/shutdown', methods=['POST'])
 def api_shutdown():
-    origin = request.headers.get('Origin', '') or request.headers.get('Referer', '')
-    if not any(h in origin for h in ['r2tele.local', '10.42.0.1', '192.168.', 'localhost', '127.0.0.1']):
-        logger.warning('Shutdown rejected: invalid origin %s', origin)
+    if not _origin_check():
         return jsonify({'ok': False, 'error': 'forbidden'}), 403
     if controller is None:
         return jsonify({'ok': False, 'error': 'controller not initialized'}), 503
@@ -661,9 +677,10 @@ def video_feed():
         _active_streams += 1
 
     _last_stale_log = 0.0
+    _last_frame_consumed = time.time()
 
     def generate():
-        nonlocal _last_stale_log
+        nonlocal _last_stale_log, _last_frame_consumed
         try:
             while True:
                 with _video_owner_lock:
@@ -674,6 +691,7 @@ def video_feed():
                     frame = latest_frame
                     ftime = latest_frame_time
                 if frame is not None:
+                    _last_frame_consumed = time.time()
                     age = time.time() - ftime
                     if age < 10.0:
                         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
@@ -682,6 +700,10 @@ def video_feed():
                             _last_stale_log = age
                             logger.warning('video_feed: stale frame %.1fs old', age)
                         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                else:
+                    if time.time() - _last_frame_consumed > 30.0:
+                        logger.warning('video_feed: no frame for 30s, closing stream')
+                        break
                 with _frame_cond:
                     _frame_cond.wait(timeout=1.0)
         except GeneratorExit:
@@ -698,97 +720,117 @@ def video_feed():
 
 @sio.on('connect')
 def on_connect():
-    with _video_owner_lock:
-        emit('video_owner', {'sid': _video_owner_sid})
-    if controller is not None:
-        emit('status', {'speeds': controller.get_all_speeds()})
-    with camera_lock:
-        emit('camera_status', {'available': camera_available})
+    try:
+        with _video_owner_lock:
+            emit('video_owner', {'sid': _video_owner_sid})
+        if controller is not None:
+            emit('status', {'speeds': controller.get_all_speeds()})
+        with camera_lock:
+            emit('camera_status', {'available': camera_available})
+    except Exception as e:
+        logger.error('on_connect error: %s', e)
 
 
 @sio.on('claim_video')
 def on_claim_video(_data=None):
-    global _video_owner_sid
-    sid = request.sid
-    with _video_owner_lock:
-        old_owner = _video_owner_sid
-        _video_owner_sid = sid
-    if old_owner and old_owner != sid:
-        sio.emit('video_lost', {'new_owner': sid}, to=old_owner)
-        logger.info('Video owner: %s → %s', old_owner[:8], sid[:8])
-    else:
-        logger.info('Video owner: %s', sid[:8])
-    emit('video_owner', {'sid': sid})
+    try:
+        global _video_owner_sid
+        sid = request.sid
+        with _video_owner_lock:
+            old_owner = _video_owner_sid
+            _video_owner_sid = sid
+        if old_owner and old_owner != sid:
+            sio.emit('video_lost', {'new_owner': sid}, to=old_owner)
+            logger.info('Video owner: %s → %s', old_owner[:8], sid[:8])
+        else:
+            logger.info('Video owner: %s', sid[:8])
+        emit('video_owner', {'sid': sid})
+    except Exception as e:
+        logger.error('claim_video error: %s', e)
 
 
 @sio.on('release_video')
 def on_release_video(_data=None):
-    global _video_owner_sid
-    with _video_owner_lock:
-        if _video_owner_sid == request.sid:
-            _video_owner_sid = None
-            logger.info('Video released by %s', request.sid[:8])
+    try:
+        global _video_owner_sid
+        with _video_owner_lock:
+            if _video_owner_sid == request.sid:
+                _video_owner_sid = None
+                logger.info('Video released by %s', request.sid[:8])
+    except Exception as e:
+        logger.error('release_video error: %s', e)
 
 
 @sio.on('disconnect')
 def on_disconnect():
-    global _video_owner_sid
-    with _video_owner_lock:
-        if _video_owner_sid == request.sid:
-            _video_owner_sid = None
-            logger.info('Video owner disconnected: %s', request.sid[:8])
+    try:
+        global _video_owner_sid
+        with _video_owner_lock:
+            if _video_owner_sid == request.sid:
+                _video_owner_sid = None
+                logger.info('Video owner disconnected: %s', request.sid[:8])
+    except Exception as e:
+        logger.error('disconnect error: %s', e)
 
 
 @sio.on('set_speed')
 def on_set_speed(data):
-    if controller is None:
-        return
-    if not isinstance(data, dict):
-        logger.warning('set_speed: invalid data type %s', type(data).__name__)
-        return
-    motor = data.get('motor')
-    speed = data.get('speed', 0)
-    if not isinstance(speed, (int, float)):
-        logger.warning('set_speed: non-numeric speed %s', type(speed).__name__)
-        speed = 0
-    if motor not in MOTOR_NAMES:
-        return
-    controller.set_speed(motor, speed)
-    emit('status', {'speeds': controller.get_all_speeds()})
+    try:
+        if controller is None:
+            return
+        if not isinstance(data, dict):
+            logger.warning('set_speed: invalid data type %s', type(data).__name__)
+            return
+        motor = data.get('motor')
+        speed = data.get('speed', 0)
+        if not isinstance(speed, (int, float)):
+            logger.warning('set_speed: non-numeric speed %s', type(speed).__name__)
+            speed = 0
+        if motor not in MOTOR_NAMES:
+            return
+        controller.set_speed(motor, speed)
+    except Exception as e:
+        logger.error('set_speed error: %s', e)
 
 
 @sio.on('set_speeds')
 def on_set_speeds(data):
-    if controller is None:
-        return
-    if not isinstance(data, dict):
-        logger.warning('set_speeds: invalid data type %s', type(data).__name__)
-        return
-    speeds = data.get('speeds', {})
-    if not isinstance(speeds, dict):
-        logger.warning('set_speeds: speeds not a dict %s', type(speeds).__name__)
-        return
-    cleaned = {}
-    for m, s in speeds.items():
-        if m not in MOTOR_NAMES:
-            logger.warning('set_speeds: unknown motor %s', m)
-            continue
-        if isinstance(s, (int, float)):
-            cleaned[m] = s
-        else:
-            logger.warning('set_speeds: non-numeric speed for motor %s', m)
-    if not cleaned:
-        return
-    controller.set_speeds(cleaned)
+    try:
+        if controller is None:
+            return
+        if not isinstance(data, dict):
+            logger.warning('set_speeds: invalid data type %s', type(data).__name__)
+            return
+        speeds = data.get('speeds', {})
+        if not isinstance(speeds, dict):
+            logger.warning('set_speeds: speeds not a dict %s', type(speeds).__name__)
+            return
+        cleaned = {}
+        for m, s in speeds.items():
+            if m not in MOTOR_NAMES:
+                logger.warning('set_speeds: unknown motor %s', m)
+                continue
+            if isinstance(s, (int, float)):
+                cleaned[m] = s
+            else:
+                logger.warning('set_speeds: non-numeric speed for motor %s', m)
+        if not cleaned:
+            return
+        controller.set_speeds(cleaned)
+    except Exception as e:
+        logger.error('set_speeds error: %s', e)
 
 
 @sio.on('stop')
 def on_stop(_data=None):
-    if controller is None:
-        return
-    controller.stop_all()
-    emit('status', {'speeds': controller.get_all_speeds()})
-    logger.info('Emergency stop triggered')
+    try:
+        if controller is None:
+            return
+        controller.stop_all()
+        emit('status', {'speeds': controller.get_all_speeds()})
+        logger.info('Emergency stop triggered')
+    except Exception as e:
+        logger.error('stop error: %s', e)
 
 
 def init_camera_async():
@@ -813,10 +855,14 @@ def _cleanup():
             controller.cleanup()
         except Exception:
             pass
+    try:
+        _stop_camera()
+    except Exception:
+        pass
+    global battery_monitor
+    if battery_monitor is not None:
         try:
-            controller.stop_all()
-            time.sleep(0.3)
-            controller.cleanup()
+            battery_monitor.cleanup()
         except Exception:
             pass
 
@@ -840,6 +886,8 @@ def api_wifi_status():
 
 @app.route('/api/wifi/connect', methods=['POST'])
 def api_wifi_connect():
+    if not _origin_check():
+        return jsonify({'ok': False, 'error': 'forbidden'}), 403
     data = request.get_json(silent=True)
     if not data or not isinstance(data, dict):
         return jsonify({'ok': False, 'error': 'Invalid request'}), 400

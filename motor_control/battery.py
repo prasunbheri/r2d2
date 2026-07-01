@@ -39,12 +39,19 @@ class BatteryMonitor:
         self._available: bool = False
         self._retries: int = 0
         self._raw_readings: deque = deque(maxlen=SMOOTHING_WINDOW)
+        self._running: bool = True
         self._init_bus()
 
     def _init_bus(self) -> None:
+        if not self._running:
+            return
         try:
             bus = smbus2.SMBus(1)
-            bus.write_i2c_block_data(ADS1115_ADDR, REG_CONF, [CONF_HI, CONF_LO])
+            try:
+                bus.write_i2c_block_data(ADS1115_ADDR, REG_CONF, [CONF_HI, CONF_LO])
+            except Exception:
+                bus.close()
+                raise
             time.sleep(0.1)
             with self._lock:
                 if self._bus is not None:
@@ -110,7 +117,7 @@ class BatteryMonitor:
         return round((voltage - V_EMPTY) / (V_FULL - V_EMPTY) * 100, 1)
 
     def run_loop(self) -> None:
-        while True:
+        while self._running:
             try:
                 if not self._available:
                     self.try_reconnect()
@@ -119,3 +126,14 @@ class BatteryMonitor:
             except Exception:
                 logger.exception('Battery poll error')
             time.sleep(POLL_INTERVAL if self._available else RETRY_INTERVAL)
+
+    def cleanup(self) -> None:
+        self._running = False
+        with self._lock:
+            if self._bus is not None:
+                try:
+                    self._bus.close()
+                except Exception:
+                    pass
+                self._bus = None
+            self._available = False
