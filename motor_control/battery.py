@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+from collections import deque
 from typing import Dict, Optional
 
 import smbus2
@@ -25,6 +26,7 @@ V_EMPTY = 2.5 * CELLS
 POLL_INTERVAL = 5
 RETRY_INTERVAL = 30
 MAX_RETRIES = 3
+SMOOTHING_WINDOW = 5
 
 
 class BatteryMonitor:
@@ -36,6 +38,7 @@ class BatteryMonitor:
         self._percentage: float = 0.0
         self._available: bool = False
         self._retries: int = 0
+        self._raw_readings: deque = deque(maxlen=SMOOTHING_WINDOW)
         self._init_bus()
 
     def _init_bus(self) -> None:
@@ -69,12 +72,14 @@ class BatteryMonitor:
                 raw -= 0x10000
             v_adc = raw * 6.144 / 32768.0
             v_bat = v_adc * DIVIDER_RATIO
-            pct = self._voltage_to_pct(v_bat)
+            self._raw_readings.append(v_bat)
+            v_bat_smoothed = sum(self._raw_readings) / len(self._raw_readings)
+            pct = self._voltage_to_pct(v_bat_smoothed)
             with self._lock:
-                self._voltage = round(v_bat, 2)
+                self._voltage = round(v_bat_smoothed, 2)
                 self._percentage = pct
                 self._retries = 0
-            return {'voltage': round(v_bat, 2), 'percentage': pct}
+            return {'voltage': round(v_bat_smoothed, 2), 'percentage': pct}
         except Exception as e:
             with self._lock:
                 self._retries += 1

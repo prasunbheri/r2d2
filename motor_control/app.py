@@ -50,6 +50,7 @@ latest_frame_time: float = 0.0
 camera_fps: float = 0.0
 _last_frame_time: float = 0.0
 _frame_cond: threading.Condition = threading.Condition()
+
 _frame_lock: threading.Lock = threading.Lock()
 _camera_retry_lock: threading.Lock = threading.Lock()
 
@@ -572,7 +573,7 @@ def _stats_collector():
             if battery_monitor is not None:
                 bat_data = battery_monitor.get_data()
                 if bat_data['available']:
-                    bat_voltage = bat_data['percentage']
+                    bat_voltage = bat_data['voltage']
             sample = {
                 't': now,
                 'cpu': cpu_pct,
@@ -806,6 +807,12 @@ def init_camera_async():
 def _cleanup():
     global controller
     if controller is not None:
+        try:
+            controller.stop_all()
+            time.sleep(0.3)
+            controller.cleanup()
+        except Exception:
+            pass
         try:
             controller.stop_all()
             time.sleep(0.3)
