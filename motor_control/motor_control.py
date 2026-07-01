@@ -77,7 +77,11 @@ class MotorController:
         pins = MOTOR_PINS[motor]
         for attempt in range(4):
             try:
-                if speed >= 0:
+                if speed == 0:
+                    duty = 0
+                    self.pi.set_PWM_dutycycle(pins['pwm'], duty)
+                    return
+                if speed > 0:
                     self.pi.write(pins['dir'], 1)
                     duty = int((speed / 100.0) * PWM_RANGE)
                 else:
