@@ -21,6 +21,7 @@ AP_SSID = 'r2tele'
 AP_PASSWORD = 'r2tele'
 CONNECT_TIMEOUT = 25
 
+_hotspot_lock = threading.Lock()
 _hotspot_process = None
 
 
@@ -316,7 +317,6 @@ def start_ap() -> Optional[Dict]:
             time.sleep(5)
             if proc.poll() is not None and proc.returncode != 0:
                 logger.error('AP start failed: nmcli exited with code %d', proc.returncode)
-                _hotspot_process = None
                 return None
 
             _hotspot_process = proc
