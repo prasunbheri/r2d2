@@ -735,7 +735,8 @@ const SPEED_THROTTLE = 50; // ms — limits server thread creation
 
 function sendSpeeds(speeds) {
   const now = Date.now();
-  if (now - lastSpeedSend >= SPEED_THROTTLE) {
+  const isZero = Object.values(speeds).every(v => v === 0);
+  if (isZero || now - lastSpeedSend >= SPEED_THROTTLE) {
     socket.emit('set_speeds', { speeds });
     lastSpeedSend = now;
   }
@@ -793,6 +794,7 @@ function chaseStep(timestamp) {
     applyJoy(targetX, targetY);
     lastChaseTime = 0;
     if (targetX === 0 && targetY === 0) {
+      flushSpeeds();
       chaseId = null;
       return;
     }
